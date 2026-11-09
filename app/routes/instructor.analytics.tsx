@@ -8,7 +8,6 @@ import {
   countDistinct,
   desc,
   eq,
-  gte,
   inArray,
   isNull,
   ne,
@@ -17,7 +16,7 @@ import {
   sql,
   sum,
 } from "drizzle-orm";
-import { alias, type SQLiteColumn } from "drizzle-orm/sqlite-core";
+import { alias } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
   CourseStatus,
@@ -37,6 +36,17 @@ import {
   users,
 } from "~/db/schema";
 import { splitRevenue, type AnalyticsRange } from "~/lib/analytics";
+import {
+  getCourseRevenue,
+  getRevenueOverTime,
+  getRevenueSummary,
+  getStudentRevenue,
+  ownedBy,
+  purchaseScope,
+  scopeOn,
+  sinceRange,
+  type RevenueSeries,
+} from "~/lib/revenue.server";
 import { getDiscountForCountry } from "~/lib/ppp";
 import {
   ANALYTICS_RANGES,
@@ -98,30 +108,6 @@ function parseId(value: string | null): number | null {
   const id = Number(value);
   return value !== null && Number.isInteger(id) && id > 0 ? id : null;
 }
-
-type RevenueSummary = {
-  grossCents: number;
-  feeCents: number;
-  netCents: number;
-  purchaseCount: number;
-};
-
-type RevenuePoint = {
-  bucket: string;
-  grossCents: number;
-  netCents: number;
-};
-
-type RevenueSeries = {
-  granularity: "day" | "month";
-  points: RevenuePoint[];
-};
-
-type StudentRevenue = {
-  userId: number;
-  name: string;
-  revenueCents: number;
-};
 
 type TopBuyer = {
   userId: number;
@@ -197,115 +183,6 @@ type CourseCountryRevenue = {
   discountedSharePercent: number;
   rows: CountryRevenueRow[];
 };
-
-function scopeOn(
-  dateColumn: SQLiteColumn,
-  instructorId: number | null,
-  range: AnalyticsRange
-) {
-  const conditions = [];
-
-  if (instructorId !== null) {
-    conditions.push(eq(courses.instructorId, instructorId));
-  }
-
-  const start = rangeStart(range);
-  if (start !== null) {
-    conditions.push(gte(dateColumn, start));
-  }
-
-  return conditions.length > 0 ? and(...conditions) : undefined;
-}
-
-function purchaseScope(instructorId: number | null, range: AnalyticsRange) {
-  return scopeOn(purchases.createdAt, instructorId, range);
-}
-
-function sinceRange(dateColumn: SQLiteColumn, range: AnalyticsRange) {
-  const start = rangeStart(range);
-  return start === null ? undefined : gte(dateColumn, start);
-}
-
-function ownedBy(instructorId: number | null) {
-  return instructorId === null
-    ? undefined
-    : eq(courses.instructorId, instructorId);
-}
-
-function getStudentRevenue(
-  instructorId: number | null,
-  range: AnalyticsRange
-): StudentRevenue[] {
-  const students = db
-    .selectDistinct({ userId: users.id, name: users.name })
-    .from(enrollments)
-    .innerJoin(courses, eq(enrollments.courseId, courses.id))
-    .innerJoin(users, eq(users.id, enrollments.userId))
-    .where(scopeOn(enrollments.enrolledAt, instructorId, range))
-    .orderBy(users.name)
-    .all();
-
-  if (students.length === 0) return [];
-
-  const studentIds = students.map((student) => student.userId);
-
-  // Correlated: did this purchase mint seats for other people?
-  const mintedSeats = db
-    .select({ one: sql`1` })
-    .from(coupons)
-    .where(eq(coupons.purchaseId, purchases.id));
-
-  const direct = db
-    .select({ userId: purchases.userId, paid: sum(purchases.amountPaid) })
-    .from(purchases)
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(
-      and(
-        inArray(purchases.userId, studentIds),
-        notExists(mintedSeats),
-        ownedBy(instructorId)
-      )
-    )
-    .groupBy(purchases.userId)
-    .all();
-
-  const seatCounts = db
-    .select({ purchaseId: coupons.purchaseId, seats: count().as("seats") })
-    .from(coupons)
-    .groupBy(coupons.purchaseId)
-    .as("seat_counts");
-
-  const viaSeat = db
-    .select({
-      userId: coupons.redeemedByUserId,
-      // Divided rather than rounded per row: the shares are summed first and
-      // rounded once, so five seats out of 3333 cents still add up.
-      paid: sql<number>`sum(${purchases.amountPaid} * 1.0 / ${seatCounts.seats})`,
-    })
-    .from(coupons)
-    .innerJoin(purchases, eq(coupons.purchaseId, purchases.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .innerJoin(seatCounts, eq(seatCounts.purchaseId, coupons.purchaseId))
-    .where(
-      and(inArray(coupons.redeemedByUserId, studentIds), ownedBy(instructorId))
-    )
-    .groupBy(coupons.redeemedByUserId)
-    .all();
-
-  const paidByUser = new Map<number, number>();
-  const credit = (userId: number | null, paid: unknown) => {
-    if (userId === null) return;
-    paidByUser.set(userId, (paidByUser.get(userId) ?? 0) + Number(paid ?? 0));
-  };
-
-  for (const row of direct) credit(row.userId, row.paid);
-  for (const row of viaSeat) credit(row.userId, row.paid);
-
-  return students.map((student) => ({
-    ...student,
-    revenueCents: Math.round(paidByUser.get(student.userId) ?? 0),
-  }));
-}
 
 const TOP_BUYER_LIMIT = 10;
 
@@ -400,77 +277,6 @@ function getRatingSummary(
   }
 
   return { average: Math.round(row.average * 10) / 10, count: row.count };
-}
-
-/** The bucket an ISO timestamp falls in, at the given granularity. */
-function bucketOf(iso: string, granularity: "day" | "month"): string {
-  return iso.slice(0, granularity === "day" ? 10 : 7);
-}
-
-/** Every bucket from `first` to `last` inclusive, with none skipped. */
-function bucketRange(
-  first: string,
-  last: string,
-  granularity: "day" | "month"
-): string[] {
-  const buckets: string[] = [];
-  const cursor = new Date(
-    `${first}${granularity === "day" ? "" : "-01"}T00:00:00.000Z`
-  );
-
-  while (bucketOf(cursor.toISOString(), granularity) <= last) {
-    buckets.push(bucketOf(cursor.toISOString(), granularity));
-    if (granularity === "day") {
-      cursor.setUTCDate(cursor.getUTCDate() + 1);
-    } else {
-      cursor.setUTCMonth(cursor.getUTCMonth() + 1);
-    }
-  }
-
-  return buckets;
-}
-
-function getRevenueOverTime(
-  instructorId: number | null,
-  range: AnalyticsRange
-): RevenueSeries {
-  const granularity = range === "all" ? "month" : "day";
-  const bucketExpr = sql<string>`substr(${purchases.createdAt}, 1, ${
-    granularity === "day" ? 10 : 7
-  })`;
-
-  const rows = db
-    .select({ bucket: bucketExpr, gross: sum(purchases.amountPaid) })
-    .from(purchases)
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(purchaseScope(instructorId, range))
-    .groupBy(bucketExpr)
-    .orderBy(bucketExpr)
-    .all();
-
-  if (rows.length === 0 && range === "all") return { granularity, points: [] };
-
-  const grossByBucket = new Map(
-    rows.map((row) => [row.bucket, Number(row.gross ?? 0)])
-  );
-
-  const now = new Date().toISOString();
-  // A fixed range always spans its whole window, even before the first sale;
-  // all time can only start where the data does.
-  const start = rangeStart(range) ?? rows[0].bucket;
-
-  const points = bucketRange(
-    bucketOf(start, granularity),
-    bucketOf(now, granularity),
-    granularity
-  ).map((bucket) => {
-    const { grossCents, netCents } = splitRevenue(
-      grossByBucket.get(bucket) ?? 0
-    );
-    return { bucket, grossCents, netCents };
-  });
-
-  return { granularity, points };
 }
 
 /** Every lesson of a course, as a subquery for the progress joins. */
@@ -885,46 +691,13 @@ export async function loader({ request, url }: Route.LoaderArgs) {
     older: (questionRow?.total ?? 0) - questionsInRange,
   };
 
-  // Gross revenue, the platform's fee and the instructor's net for the range.
-  const summaryRow = db
-    .select({
-      gross: sum(purchases.amountPaid),
-      purchaseCount: count(purchases.id),
-    })
-    .from(purchases)
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(purchaseScope(instructorId, range))
-    .get();
+  // Gross revenue, refunds, the platform's fee and the instructor's net for
+  // the range. Refunds count in the period they were approved.
+  const summary = getRevenueSummary(instructorId, range);
 
-  // sum() returns null over an empty set, and a string when SQLite has rows.
-  const summary: RevenueSummary = {
-    ...splitRevenue(Number(summaryRow?.gross ?? 0)),
-    purchaseCount: summaryRow?.purchaseCount ?? 0,
-  };
-
-  // Revenue broken down by course, biggest earner first. Courses with no sales
-  // in the range are absent rather than listed at zero.
-  const courseRevenueRows = db
-    .select({
-      courseId: courses.id,
-      title: courses.title,
-      gross: sum(purchases.amountPaid),
-      purchaseCount: count(purchases.id),
-    })
-    .from(purchases)
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(purchaseScope(instructorId, range))
-    .groupBy(courses.id)
-    .all();
-
-  const courseRevenue = courseRevenueRows
-    .map((row) => ({
-      courseId: row.courseId,
-      title: row.title,
-      ...splitRevenue(Number(row.gross ?? 0)),
-      purchaseCount: row.purchaseCount,
-    }))
-    .sort((a, b) => b.grossCents - a.grossCents);
+  // Revenue broken down by course, biggest earner first. Courses with no
+  // activity in the range are absent rather than listed at zero.
+  const courseRevenue = getCourseRevenue(instructorId, range);
 
   // How many people paid, and how many are learning. Deliberately two numbers:
   // one team purchase is a single buyer covering several seats, and someone who
@@ -1631,7 +1404,7 @@ export default function InstructorAnalytics({
           </TabsList>
 
           <TabsContent value="overview" className="space-y-6">
-            <div className="grid gap-4 sm:grid-cols-3">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <MoneyCard
                 label="Gross revenue"
                 amountCents={summary.grossCents}
@@ -1640,14 +1413,19 @@ export default function InstructorAnalytics({
                 }.`}
               />
               <MoneyCard
+                label="Refunds"
+                amountCents={summary.refundsCents}
+                hint="Refunds approved in this period, whenever the purchase was made."
+              />
+              <MoneyCard
                 label={`Platform fee (${PLATFORM_FEE_PERCENT}%)`}
                 amountCents={summary.feeCents}
-                hint="Cadence's cut. Already deducted from your earnings."
+                hint="Cadence's cut of gross revenue less refunds. Already deducted from your earnings."
               />
               <MoneyCard
                 label="Your net earnings"
                 amountCents={summary.netCents}
-                hint="What you keep — gross revenue minus the platform fee."
+                hint="What you keep — gross revenue minus refunds and the platform fee."
                 emphasis
               />
             </div>
@@ -1718,7 +1496,7 @@ export default function InstructorAnalytics({
                     than being told there is nothing there. */}
                 {summary.purchaseCount === 0 ? (
                   <p className="py-12 text-center text-sm text-muted-foreground">
-                    No sales in this period yet.
+                    No sales or refunds in this period yet.
                   </p>
                 ) : (
                   <RevenueChart series={series} />
@@ -1850,6 +1628,9 @@ export default function InstructorAnalytics({
                         <th className="pb-2 text-right font-medium">Sales</th>
                         <th className="pb-2 text-right font-medium">Gross</th>
                         <th className="pb-2 text-right font-medium">
+                          Refunds
+                        </th>
+                        <th className="pb-2 text-right font-medium">
                           Fee ({PLATFORM_FEE_PERCENT}%)
                         </th>
                         <th className="pb-2 text-right font-medium">Net</th>
@@ -1864,6 +1645,9 @@ export default function InstructorAnalytics({
                           </td>
                           <td className="py-3 text-right tabular-nums">
                             {formatMoney(course.grossCents)}
+                          </td>
+                          <td className="py-3 text-right tabular-nums text-muted-foreground">
+                            {formatMoney(course.refundsCents)}
                           </td>
                           <td className="py-3 text-right tabular-nums text-muted-foreground">
                             {formatMoney(course.feeCents)}
