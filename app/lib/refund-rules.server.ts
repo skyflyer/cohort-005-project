@@ -19,6 +19,8 @@ export const MAX_WATCHED_HOURS = 2;
 // requests. Functions that read the database take it as a last argument
 // (defaulting to the app database) so tests can pass an in-memory one.
 type Database = typeof db;
+// Read-only helpers also accept a transaction handle.
+type Reader = Pick<Database, "select">;
 
 /**
  * A purchase made at a purchasing-power price is given back at what was paid,
@@ -56,7 +58,7 @@ export function isWithinRefundWindow(
 /** The ids of every lesson in a course. */
 export function getCourseLessonIds(
   courseId: number,
-  database: Database = db
+  database: Reader = db
 ): number[] {
   return database
     .select({ id: lessons.id })
@@ -103,7 +105,7 @@ export function getWatchedSeconds(
 /** Whether any seat of a team purchase has been claimed. */
 export function hasClaimedSeat(
   purchaseId: number,
-  database: Database = db
+  database: Reader = db
 ): boolean {
   const seat = database
     .select({ id: coupons.id })

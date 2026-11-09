@@ -1,15 +1,24 @@
 import { data } from "react-router";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, count, eq, inArray } from "drizzle-orm";
 import { db } from "~/db";
 import {
+  coupons,
+  courseRatings,
   courses,
+  enrollments,
+  lessonProgress,
   purchases,
+  quizAnswers,
+  quizAttempts,
+  quizzes,
   refunds,
   RefundStatus,
   users,
 } from "~/db/schema";
 import {
+  getCourseLessonIds,
   getRefundableAmount,
+  hasClaimedSeat,
   getWatchedSeconds,
   hasWatchedTooMuch,
 } from "~/lib/refund-rules.server";
@@ -35,6 +44,7 @@ function selectRefundsWithContext(reader: Pick<Database, "select">) {
       courseId: courses.id,
       courseTitle: courses.title,
       coursePrice: courses.price,
+      purchaseId: purchases.id,
       purchasedAt: purchases.createdAt,
       amountPaid: purchases.amountPaid,
       country: purchases.country,
@@ -43,6 +53,28 @@ function selectRefundsWithContext(reader: Pick<Database, "select">) {
     .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
     .innerJoin(users, eq(purchases.userId, users.id))
     .innerJoin(courses, eq(purchases.courseId, courses.id));
+}
+
+/** How many lessons of the course the learner has a progress row for. */
+function countLessonsWithProgress(
+  userId: number,
+  courseId: number,
+  database: Pick<Database, "select">
+): number {
+  const lessonIds = getCourseLessonIds(courseId, database);
+  if (lessonIds.length === 0) return 0;
+
+  const row = database
+    .select({ lessons: count() })
+    .from(lessonProgress)
+    .where(
+      and(
+        eq(lessonProgress.userId, userId),
+        inArray(lessonProgress.lessonId, lessonIds)
+      )
+    )
+    .get();
+  return row?.lessons ?? 0;
 }
 
 /**
@@ -83,6 +115,12 @@ export function getOpenRefundRequests(database: Database = db) {
       ),
       currentWatchedSeconds,
       isOverWatchLimitNow: hasWatchedTooMuch(currentWatchedSeconds),
+      lessonsWithProgress: countLessonsWithProgress(
+        row.learnerId,
+        row.courseId,
+        database
+      ),
+      hasClaimedSeat: hasClaimedSeat(row.purchaseId, database),
     };
   });
 }
@@ -199,6 +237,158 @@ export function declineRefundRequest(
       learnerEmail: refund.learnerEmail,
       courseTitle: refund.courseTitle,
       declineMessage,
+    }),
+  };
+}
+
+/**
+ * The email the learner gets when their refund request is approved. There is
+ * no mail transport wired up yet, so the caller logs the built message.
+ */
+export function buildRefundApprovalEmail(input: {
+  learnerName: string;
+  learnerEmail: string;
+  courseTitle: string;
+  amount: number;
+}) {
+  return {
+    to: input.learnerEmail,
+    subject: `Refund approved — ${input.courseTitle}`,
+    body: [
+      `Hi ${input.learnerName},`,
+      "",
+      `Your refund request for "${input.courseTitle}" has been approved.`,
+      `We are refunding ${formatPrice(input.amount)} to your card.`,
+      "",
+      "As we warned when you asked, your access to the course has ended and your progress for it has been deleted.",
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
+}
+
+/**
+ * Approves an open refund request (ADR 0001). In one transaction: marks the
+ * refund approved at the refundable amount, deletes the learner's enrollment,
+ * lesson progress, quiz attempts and answers, and rating for the course,
+ * and deletes the purchase's unredeemed seat codes so they stop working.
+ * Watch history and comments are kept. Refused if a seat was claimed.
+ * Returns the approval email for the caller to send.
+ */
+export function approveRefundRequest(
+  input: { refundId: number; adminId: number },
+  database: Database = db
+) {
+  const refund = database.transaction((tx) => {
+    const found = selectRefundsWithContext(tx)
+      .where(eq(refunds.id, input.refundId))
+      .get();
+
+    if (!found) {
+      throw data("Refund request not found", { status: 404 });
+    }
+
+    if (hasClaimedSeat(found.purchaseId, tx)) {
+      throw data(
+        "A team seat on this purchase has been claimed, so the refund cannot be approved.",
+        { status: 409 }
+      );
+    }
+
+    const amountRefunded = getRefundableAmount(
+      { amountPaid: found.amountPaid, country: found.country },
+      { price: found.coursePrice }
+    );
+
+    // Only update a row that is still open, so two admins resolving the same
+    // request cannot both succeed.
+    const updated = tx
+      .update(refunds)
+      .set({
+        status: RefundStatus.Approved,
+        amountRefunded,
+        resolvedAt: new Date().toISOString(),
+        resolvedByUserId: input.adminId,
+      })
+      .where(
+        and(
+          eq(refunds.id, input.refundId),
+          eq(refunds.status, RefundStatus.Requested)
+        )
+      )
+      .run();
+
+    if (updated.changes !== 1) {
+      throw data("This refund request has already been resolved.", {
+        status: 409,
+      });
+    }
+
+    const lessonIds = getCourseLessonIds(found.courseId, tx);
+    if (lessonIds.length > 0) {
+      const attemptIds = tx
+        .select({ id: quizAttempts.id })
+        .from(quizAttempts)
+        .innerJoin(quizzes, eq(quizAttempts.quizId, quizzes.id))
+        .where(
+          and(
+            eq(quizAttempts.userId, found.learnerId),
+            inArray(quizzes.lessonId, lessonIds)
+          )
+        )
+        .all()
+        .map((row) => row.id);
+
+      // Answers go before the attempts they point at.
+      if (attemptIds.length > 0) {
+        tx.delete(quizAnswers)
+          .where(inArray(quizAnswers.attemptId, attemptIds))
+          .run();
+        tx.delete(quizAttempts)
+          .where(inArray(quizAttempts.id, attemptIds))
+          .run();
+      }
+
+      tx.delete(lessonProgress)
+        .where(
+          and(
+            eq(lessonProgress.userId, found.learnerId),
+            inArray(lessonProgress.lessonId, lessonIds)
+          )
+        )
+        .run();
+    }
+
+    tx.delete(courseRatings)
+      .where(
+        and(
+          eq(courseRatings.userId, found.learnerId),
+          eq(courseRatings.courseId, found.courseId)
+        )
+      )
+      .run();
+
+    tx.delete(enrollments)
+      .where(
+        and(
+          eq(enrollments.userId, found.learnerId),
+          eq(enrollments.courseId, found.courseId)
+        )
+      )
+      .run();
+
+    // No seat was claimed (checked above), so every code is unredeemed.
+    tx.delete(coupons).where(eq(coupons.purchaseId, found.purchaseId)).run();
+
+    return { ...found, amountRefunded };
+  });
+
+  return {
+    email: buildRefundApprovalEmail({
+      learnerName: refund.learnerName,
+      learnerEmail: refund.learnerEmail,
+      courseTitle: refund.courseTitle,
+      amount: refund.amountRefunded,
     }),
   };
 }

@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
 import { formatPrice } from "~/lib/utils";
 import {
+  approveRefundRequest,
   buildRefundRequestEmail,
   declineRefundRequest,
   getOpenRefundRequests,
@@ -80,7 +81,17 @@ function setup() {
       })
       .run();
 
-  return { testDb, user, instructor, course, admin, lesson, purchase, request, watch };
+  return {
+    testDb,
+    user,
+    instructor,
+    course,
+    admin,
+    lesson,
+    purchase,
+    request,
+    watch,
+  };
 }
 
 describe("getOpenRefundRequests", () => {
@@ -127,7 +138,11 @@ describe("declineRefundRequest", () => {
     const refund = request();
 
     declineRefundRequest(
-      { refundId: refund.id, adminId: admin.id, declineMessage: "  Too far in.  " },
+      {
+        refundId: refund.id,
+        adminId: admin.id,
+        declineMessage: "  Too far in.  ",
+      },
       testDb
     );
 
@@ -261,5 +276,302 @@ describe("buildRefundRequestEmail", () => {
 
   it("states the refundable amount", () => {
     expect(email.body).toContain(formatPrice(4900));
+  });
+});
+
+// A learner with a course full of progress, quiz work, a rating, a comment and
+// watch history, plus a second course whose data must survive an approval.
+function setupApproval() {
+  const base = setup();
+  const { testDb, user, instructor, course, lesson, purchase } = base;
+
+  testDb
+    .insert(schema.enrollments)
+    .values({ userId: user.id, courseId: course.id })
+    .run();
+
+  const otherCourse = testDb
+    .insert(schema.courses)
+    .values({
+      title: "Other Course",
+      slug: "other-course",
+      description: "Another",
+      salesCopy: "Copy",
+      instructorId: instructor.id,
+      categoryId: course.categoryId,
+      status: schema.CourseStatus.Published,
+    })
+    .returning()
+    .get();
+  const otherModule = testDb
+    .insert(schema.modules)
+    .values({ courseId: otherCourse.id, title: "OM", position: 1 })
+    .returning()
+    .get();
+  const otherLesson = testDb
+    .insert(schema.lessons)
+    .values({ moduleId: otherModule.id, title: "OL", position: 1 })
+    .returning()
+    .get();
+  testDb
+    .insert(schema.enrollments)
+    .values({ userId: user.id, courseId: otherCourse.id })
+    .run();
+
+  const addProgress = (lessonId: number) =>
+    testDb
+      .insert(schema.lessonProgress)
+      .values({
+        userId: user.id,
+        lessonId,
+        status: schema.LessonProgressStatus.Completed,
+      })
+      .run();
+  const addQuizAttempt = (lessonId: number) => {
+    const quiz = testDb
+      .insert(schema.quizzes)
+      .values({ lessonId, title: "Q", passingScore: 0.5 })
+      .returning()
+      .get();
+    const question = testDb
+      .insert(schema.quizQuestions)
+      .values({
+        quizId: quiz.id,
+        questionText: "?",
+        questionType: schema.QuestionType.TrueFalse,
+        position: 1,
+      })
+      .returning()
+      .get();
+    const option = testDb
+      .insert(schema.quizOptions)
+      .values({ questionId: question.id, optionText: "True", isCorrect: true })
+      .returning()
+      .get();
+    const attempt = testDb
+      .insert(schema.quizAttempts)
+      .values({ userId: user.id, quizId: quiz.id, score: 1, passed: true })
+      .returning()
+      .get();
+    testDb
+      .insert(schema.quizAnswers)
+      .values({
+        attemptId: attempt.id,
+        questionId: question.id,
+        selectedOptionId: option.id,
+      })
+      .run();
+  };
+  const addRating = (courseId: number) =>
+    testDb
+      .insert(schema.courseRatings)
+      .values({ userId: user.id, courseId, rating: 4 })
+      .run();
+
+  addProgress(lesson.id);
+  addQuizAttempt(lesson.id);
+  addRating(course.id);
+  testDb
+    .insert(schema.comments)
+    .values({ lessonId: lesson.id, userId: user.id, body: "Nice lesson" })
+    .run();
+  base.watch(600, "2026-11-02T10:00:00.000Z");
+
+  addProgress(otherLesson.id);
+  addQuizAttempt(otherLesson.id);
+  addRating(otherCourse.id);
+
+  const team = testDb.insert(schema.teams).values({}).returning().get();
+  const seat = (code: string, redeemedBy?: number) =>
+    testDb
+      .insert(schema.coupons)
+      .values({
+        teamId: team.id,
+        courseId: course.id,
+        code,
+        purchaseId: purchase.id,
+        redeemedByUserId: redeemedBy,
+        redeemedAt: redeemedBy ? LATER : undefined,
+      })
+      .run();
+
+  return { ...base, otherCourse, seat };
+}
+
+describe("approveRefundRequest", () => {
+  it("deletes the learner's enrollment, progress, quiz work and rating for the course only", () => {
+    const { testDb, admin, course, otherCourse, request } = setupApproval();
+    const refund = request();
+
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    const enrolled = testDb.select().from(schema.enrollments).all();
+    expect(enrolled.map((e) => e.courseId)).toEqual([otherCourse.id]);
+    expect(testDb.select().from(schema.lessonProgress).all()).toHaveLength(1);
+    expect(testDb.select().from(schema.quizAttempts).all()).toHaveLength(1);
+    expect(testDb.select().from(schema.quizAnswers).all()).toHaveLength(1);
+    const ratings = testDb.select().from(schema.courseRatings).all();
+    expect(ratings.map((r) => r.courseId)).toEqual([otherCourse.id]);
+    expect(ratings.map((r) => r.courseId)).not.toContain(course.id);
+  });
+
+  it("keeps the learner's watch history and comments", () => {
+    const { testDb, admin, request } = setupApproval();
+    const refund = request();
+
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    expect(testDb.select().from(schema.videoWatchEvents).all()).toHaveLength(1);
+    expect(testDb.select().from(schema.comments).all()).toHaveLength(1);
+  });
+
+  it("marks the refund approved with who, when and the refunded amount", () => {
+    const { testDb, admin, request } = setupApproval();
+    const refund = request();
+
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    const after = testDb.select().from(schema.refunds).get();
+    expect(after).toMatchObject({
+      status: schema.RefundStatus.Approved,
+      resolvedByUserId: admin.id,
+      amountRefunded: 10000,
+    });
+    expect(after?.resolvedAt).toEqual(expect.any(String));
+  });
+
+  it("refunds the amount paid for a purchase made at a purchasing-power price", () => {
+    const { testDb, admin, purchase, request } = setupApproval();
+    testDb
+      .update(schema.purchases)
+      .set({ country: "IN", amountPaid: 4000 })
+      .where(eq(schema.purchases.id, purchase.id))
+      .run();
+    const refund = request();
+
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    expect(testDb.select().from(schema.refunds).get()?.amountRefunded).toBe(
+      4000
+    );
+  });
+
+  it("refunds the list price for a purchase made at full price", () => {
+    const { testDb, admin, purchase, request } = setupApproval();
+    testDb
+      .update(schema.purchases)
+      .set({ country: "US", amountPaid: 9000 })
+      .where(eq(schema.purchases.id, purchase.id))
+      .run();
+    const refund = request();
+
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    expect(testDb.select().from(schema.refunds).get()?.amountRefunded).toBe(
+      10000
+    );
+  });
+
+  it("invalidates unredeemed seat codes and leaves no usable code behind", () => {
+    const { testDb, admin, seat, request } = setupApproval();
+    seat("UNUSED-1");
+    seat("UNUSED-2");
+    const refund = request();
+
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    expect(testDb.select().from(schema.coupons).all()).toEqual([]);
+  });
+
+  it("refuses when a seat was claimed and changes nothing", () => {
+    const { testDb, admin, instructor, seat, request } = setupApproval();
+    seat("UNUSED-1");
+    seat("CLAIMED-1", instructor.id);
+    const refund = request();
+
+    expect(() =>
+      approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb)
+    ).toThrow();
+
+    expect(testDb.select().from(schema.refunds).get()?.status).toBe(
+      schema.RefundStatus.Requested
+    );
+    expect(testDb.select().from(schema.enrollments).all()).toHaveLength(2);
+    expect(testDb.select().from(schema.lessonProgress).all()).toHaveLength(2);
+    expect(testDb.select().from(schema.coupons).all()).toHaveLength(2);
+  });
+
+  it("rolls everything back if a step fails part-way", () => {
+    const { testDb, admin, request } = setupApproval();
+    // Make the last delete fail, after the earlier ones have already run.
+    testDb.run(
+      sql`CREATE TRIGGER fail_enrollment_delete BEFORE DELETE ON enrollments BEGIN SELECT RAISE(ABORT, 'boom'); END`
+    );
+    const refund = request();
+
+    expect(() =>
+      approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb)
+    ).toThrow();
+
+    expect(testDb.select().from(schema.refunds).get()?.status).toBe(
+      schema.RefundStatus.Requested
+    );
+    expect(testDb.select().from(schema.lessonProgress).all()).toHaveLength(2);
+    expect(testDb.select().from(schema.quizAnswers).all()).toHaveLength(2);
+    expect(testDb.select().from(schema.courseRatings).all()).toHaveLength(2);
+  });
+
+  it("rejects a request that is not open", () => {
+    const { testDb, admin, request } = setupApproval();
+    const refund = request(schema.RefundStatus.Declined);
+
+    expect(() =>
+      approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb)
+    ).toThrow();
+    expect(testDb.select().from(schema.enrollments).all()).toHaveLength(2);
+  });
+
+  it("cannot be applied twice", () => {
+    const { testDb, admin, request } = setupApproval();
+    const refund = request();
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    expect(() =>
+      approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb)
+    ).toThrow();
+  });
+
+  it("returns an approval email saying the progress was deleted", () => {
+    const { testDb, user, course, admin, request } = setupApproval();
+    const refund = request();
+
+    const { email } = approveRefundRequest(
+      { refundId: refund.id, adminId: admin.id },
+      testDb
+    );
+
+    expect(email.to).toBe(user.email);
+    expect(email.subject).toContain(course.title);
+    expect(email.body).toContain(formatPrice(10000));
+    expect(email.body).toMatch(/progress/i);
+  });
+});
+
+describe("getOpenRefundRequests approval details", () => {
+  it("counts the lessons with progress in the refunded course only", () => {
+    const { testDb, request } = setupApproval();
+    request();
+
+    expect(getOpenRefundRequests(testDb)[0].lessonsWithProgress).toBe(1);
+  });
+
+  it("flags a request whose team seat has been claimed", () => {
+    const { testDb, instructor, seat, request } = setupApproval();
+    request();
+    expect(getOpenRefundRequests(testDb)[0].hasClaimedSeat).toBe(false);
+
+    seat("CLAIMED-1", instructor.id);
+
+    expect(getOpenRefundRequests(testDb)[0].hasClaimedSeat).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { z } from "zod";
 import { AlertTriangle, RotateCcw } from "lucide-react";
@@ -7,6 +7,7 @@ import type { Route } from "./+types/admin.refunds";
 import { requireAdmin } from "~/lib/access.server";
 import { parseFormData } from "~/lib/validation";
 import {
+  approveRefundRequest,
   declineRefundRequest,
   getOpenRefundRequests,
 } from "~/lib/refund-requests.server";
@@ -18,6 +19,10 @@ import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
 
 const adminRefundActionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("approve"),
+    refundId: z.coerce.number().int(),
+  }),
   z.object({
     intent: z.literal("decline"),
     refundId: z.coerce.number().int(),
@@ -57,6 +62,19 @@ export async function action({ request }: Route.ActionArgs) {
     });
   }
 
+  if (parsed.data.intent === "approve") {
+    const { email } = approveRefundRequest({
+      refundId: parsed.data.refundId,
+      adminId: userId,
+    });
+
+    console.log(
+      `[email] to=${email.to} subject=${email.subject}\n${email.body}`
+    );
+
+    return { success: true, message: "Refund request approved." };
+  }
+
   const { email } = declineRefundRequest({
     refundId: parsed.data.refundId,
     adminId: userId,
@@ -83,10 +101,12 @@ function formatDate(iso: string): string {
   });
 }
 
-type RefundRequest = Route.ComponentProps["loaderData"]["refundRequests"][number];
+type RefundRequest =
+  Route.ComponentProps["loaderData"]["refundRequests"][number];
 
 function RefundRequestCard({ request }: { request: RefundRequest }) {
   const fetcher = useFetcher<typeof action>();
+  const [confirmingApproval, setConfirmingApproval] = useState(false);
 
   useEffect(() => {
     if (fetcher.state === "idle" && fetcher.data) {
@@ -143,6 +163,55 @@ function RefundRequestCard({ request }: { request: RefundRequest }) {
           </p>
           <p className="mt-1 whitespace-pre-wrap text-sm">{request.reason}</p>
         </div>
+
+        {request.hasClaimedSeat ? (
+          <div className="flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm">
+            <AlertTriangle className="size-4 shrink-0 text-destructive" />
+            <span>
+              A team seat on this purchase has been claimed since the request
+              was made, so it cannot be approved. You can still decline it.
+            </span>
+          </div>
+        ) : confirmingApproval ? (
+          <fetcher.Form
+            method="post"
+            className="space-y-3 rounded-md border p-3"
+          >
+            <input type="hidden" name="intent" value="approve" />
+            <input type="hidden" name="refundId" value={request.id} />
+            <p className="text-sm">
+              Approve the refund of {formatPrice(request.refundableAmount)} to{" "}
+              <strong>{request.learnerName}</strong> for{" "}
+              <strong>{request.courseTitle}</strong>? This deletes their
+              progress in {request.lessonsWithProgress}{" "}
+              {request.lessonsWithProgress === 1 ? "lesson" : "lessons"}, plus
+              their quiz attempts and rating for this course, and removes their
+              access. Unused team seat codes stop working. This cannot be
+              undone.
+            </p>
+            <div className="flex gap-2">
+              <Button
+                type="submit"
+                size="sm"
+                disabled={fetcher.state !== "idle"}
+              >
+                Confirm approval
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmingApproval(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </fetcher.Form>
+        ) : (
+          <Button size="sm" onClick={() => setConfirmingApproval(true)}>
+            Approve refund
+          </Button>
+        )}
 
         <fetcher.Form method="post" className="space-y-2">
           <input type="hidden" name="intent" value="decline" />
@@ -235,8 +304,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           : "Only admins can access this page.";
     } else {
       title = `Error ${error.status}`;
-      message =
-        typeof error.data === "string" ? error.data : error.statusText;
+      message = typeof error.data === "string" ? error.data : error.statusText;
     }
   }
 
