@@ -10,6 +10,7 @@ import {
   UserRole,
   CourseStatus,
   LessonProgressStatus,
+  RefundStatus,
   QuestionType,
   TeamMemberRole,
 } from "../app/db/schema";
@@ -2221,6 +2222,12 @@ This course is still in draft while the cluster examples are rewritten against t
   addWatchSession(students[3].id, course2LessonIds[0], 0, 300, 600, 22 * 24);
   addWatchSession(students[3].id, course2LessonIds[0], 300, 360, 600, 21 * 24);
 
+  // Liam's recent purchase of course 1: one lesson watched before he asked for
+  // his money back (two days ago), and another since, so the refund requests
+  // page shows two different watch times.
+  addWatchSession(students[3].id, course1LessonIds[0], 0, 480, 480, 8 * 24);
+  addWatchSession(students[3].id, course1LessonIds[1], 0, 420, 600, 24);
+
   // ─── Purchases ───
   // Individual purchases for enrolled students
 
@@ -2724,12 +2731,12 @@ This course is still in draft while the cluster examples are rewritten against t
   );
 
   // ─── Liam's Purchase ───
-  // One learner part-way through a recent purchase, with no request raised, so
-  // the course page offers "Request a refund". The dates count back from
-  // today, so the fourteen-day refund window is still open whenever you seed.
+  // One learner part-way through a recent purchase, with a refund request open
+  // for an admin to review. The dates count back from today, so the
+  // fourteen-day refund window is still open whenever you seed.
 
   const liam = studentByEmail("liam@example.com");
-  db
+  const liamPurchase = db
     .insert(schema.purchases)
     .values({
       userId: liam.id,
@@ -2737,6 +2744,15 @@ This course is still in draft while the cluster examples are rewritten against t
       amountPaid: 7900,
       country: null,
       createdAt: daysAgo(9),
+    })
+    .returning()
+    .get();
+  db.insert(schema.refunds)
+    .values({
+      purchaseId: liamPurchase.id,
+      status: RefundStatus.Requested,
+      reason: "The course is more advanced than I expected, so I want to cancel.",
+      requestedAt: daysAgo(2),
     })
     .run();
   db.insert(schema.enrollments)

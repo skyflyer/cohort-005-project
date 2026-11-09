@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
@@ -65,11 +65,16 @@ export function getCourseLessonIds(
     .map((row) => row.id);
 }
 
-/** Sum of the furthest position the learner reached in each lesson of the course. */
+/**
+ * Sum of the furthest position the learner reached in each lesson of the
+ * course. With `until` (an ISO timestamp), only watch events created at or
+ * before it count — the watch time as it stood at that moment.
+ */
 export function getWatchedSeconds(
   userId: number,
   courseId: number,
-  database: Database = db
+  database: Database = db,
+  until?: string
 ): number {
   const lessonIds = getCourseLessonIds(courseId, database);
 
@@ -83,7 +88,8 @@ export function getWatchedSeconds(
     .where(
       and(
         eq(videoWatchEvents.userId, userId),
-        inArray(videoWatchEvents.lessonId, lessonIds)
+        inArray(videoWatchEvents.lessonId, lessonIds),
+        until === undefined ? undefined : lte(videoWatchEvents.createdAt, until)
       )
     )
     .groupBy(videoWatchEvents.lessonId)

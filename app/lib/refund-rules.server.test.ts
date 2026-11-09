@@ -153,6 +153,30 @@ describe("getWatchedSeconds", () => {
 
     expect(getWatchedSeconds(user.id, course.id, testDb)).toBe(120);
   });
+
+  it("counts only events created at or before the cutoff", () => {
+    const { testDb, user, course, addLesson } = setup();
+    const lesson = addLesson(1);
+    const watchAt = (positionSeconds: number, createdAt: string) =>
+      testDb
+        .insert(schema.videoWatchEvents)
+        .values({
+          userId: user.id,
+          lessonId: lesson.id,
+          eventType: "pause",
+          positionSeconds,
+          createdAt,
+        })
+        .run();
+    watchAt(100, "2026-11-01T10:00:00.000Z");
+    watchAt(300, "2026-11-02T10:00:00.000Z");
+    watchAt(900, "2026-11-03T10:00:00.000Z");
+
+    expect(
+      getWatchedSeconds(user.id, course.id, testDb, "2026-11-02T10:00:00.000Z")
+    ).toBe(300);
+    expect(getWatchedSeconds(user.id, course.id, testDb)).toBe(900);
+  });
 });
 
 describe("hasClaimedSeat", () => {
