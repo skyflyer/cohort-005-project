@@ -14,6 +14,10 @@ _Avoid_: Cancellation, cancel purchase, reversal, chargeback
 Money returned to the learner's card after the team approves a refund request.
 _Avoid_: Reversal, chargeback
 
+**Decline message**:
+The team's explanation to the learner of why their refund request was declined.
+_Avoid_: Rejection reason, denial note
+
 **Refund window**:
 The 14 calendar days after a purchase during which the learner may submit a refund request.
 _Avoid_: Cancellation period, cooling-off period
