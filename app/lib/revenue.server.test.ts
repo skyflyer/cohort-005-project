@@ -66,6 +66,18 @@ describe("getRevenueSummary", () => {
     });
   });
 
+  it("ignores an approved refund that has no approval time", () => {
+    const { testDb, instructor, buy, refund } = setup();
+    const purchase = buy(10000, daysAgo(5));
+    refund(purchase.id, schema.RefundStatus.Approved, 10000, null);
+
+    expect(getRevenueSummary(instructor.id, "all", testDb)).toMatchObject({
+      grossCents: 10000,
+      refundsCents: 0,
+    });
+    expect(() => getRevenueOverTime(instructor.id, "all", testDb)).not.toThrow();
+  });
+
   it("shows negative net for a period with a refund and no sales", () => {
     const { testDb, instructor, buy, refund } = setup();
     const purchase = buy(10000, daysAgo(40));

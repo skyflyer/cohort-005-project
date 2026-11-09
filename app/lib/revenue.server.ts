@@ -4,6 +4,7 @@ import {
   eq,
   gte,
   inArray,
+  isNotNull,
   notExists,
   sql,
   sum,
@@ -35,6 +36,9 @@ import { getDiscountForCountry } from "~/lib/ppp";
 // database) so tests can pass an in-memory one.
 type Database = typeof db;
 type Granularity = "day" | "month";
+
+/** How many leading characters of an ISO timestamp identify a bucket. */
+const BUCKET_LENGTH: Record<Granularity, number> = { day: 10, month: 7 };
 
 /** sum() is null over an empty set, and a string when SQLite has rows. */
 function cents(value: unknown): number {
@@ -115,7 +119,14 @@ function approvedRefunds(database: Database, condition: SQL | undefined) {
     .from(refunds)
     .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
     .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(and(eq(refunds.status, RefundStatus.Approved), condition))
+    .where(
+      and(
+        eq(refunds.status, RefundStatus.Approved),
+        // An approval with no time belongs to no period; every view skips it.
+        isNotNull(refunds.resolvedAt),
+        condition
+      )
+    )
     .as("approved_refunds");
 }
 
@@ -243,7 +254,7 @@ export type RevenueSeries = {
 
 /** The bucket an ISO timestamp falls in, at the given granularity. */
 function bucketOf(iso: string, granularity: Granularity): string {
-  return iso.slice(0, granularity === "day" ? 10 : 7);
+  return iso.slice(0, BUCKET_LENGTH[granularity]);
 }
 
 /** Every bucket from `first` to `last` inclusive, with none skipped. */
@@ -275,7 +286,7 @@ export function getRevenueOverTime(
   database: Database = db
 ): RevenueSeries {
   const granularity = range === "all" ? "month" : "day";
-  const length = granularity === "day" ? 10 : 7;
+  const length = BUCKET_LENGTH[granularity];
   const purchaseBucket = sql<string>`substr(${purchases.createdAt}, 1, ${length})`;
   const approved = approvedRefunds(
     database,
@@ -420,7 +431,7 @@ export function getStudentRevenue(
   const paidByUser = new Map<number, number>();
   const credit = (userId: number | null, paid: unknown) => {
     if (userId === null) return;
-    paidByUser.set(userId, (paidByUser.get(userId) ?? 0) + Number(paid ?? 0));
+    paidByUser.set(userId, (paidByUser.get(userId) ?? 0) + cents(paid));
   };
 
   for (const row of direct) credit(row.userId, row.paid);
@@ -445,7 +456,6 @@ export type TopBuyer = {
   seatsUnredeemed: number;
   enrolled: boolean;
 };
-
 
 export type CountryRevenueRow = {
   country: string | null;
@@ -565,7 +575,6 @@ export function getTopBuyers(
     enrolled: enrolled.has(buyer.userId),
   }));
 }
-
 
 export function getCourseRevenueByCountry(
   courseId: number,
