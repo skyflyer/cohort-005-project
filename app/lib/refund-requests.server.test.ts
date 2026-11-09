@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
+import { getSeatCodeStatus } from "./seat-codes.server";
 import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
 import { formatPrice } from "~/lib/utils";
 import {
@@ -472,7 +473,7 @@ describe("approveRefundRequest", () => {
     );
   });
 
-  it("invalidates unredeemed seat codes and leaves no usable code behind", () => {
+  it("voids unredeemed seat codes and keeps their rows", () => {
     const { testDb, admin, seat, request } = setupApproval();
     seat("UNUSED-1");
     seat("UNUSED-2");
@@ -480,7 +481,28 @@ describe("approveRefundRequest", () => {
 
     approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
 
-    expect(testDb.select().from(schema.coupons).all()).toEqual([]);
+    const codes = testDb.select().from(schema.coupons).all();
+    expect(codes).toHaveLength(2);
+    for (const code of codes) {
+      expect(getSeatCodeStatus(code)).toMatchObject({
+        redeemable: false,
+        reason: "voided",
+      });
+    }
+  });
+
+  it("reports an already-resolved request as resolved even if a seat was claimed", () => {
+    const { testDb, admin, instructor, seat, request } = setupApproval();
+    seat("CLAIMED-1", instructor.id);
+    const refund = request(schema.RefundStatus.Declined);
+
+    expect(() =>
+      approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb)
+    ).toThrow(
+      expect.objectContaining({
+        data: "This refund request has already been resolved.",
+      })
+    );
   });
 
   it("refuses when a seat was claimed and changes nothing", () => {

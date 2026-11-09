@@ -101,8 +101,7 @@ function formatDate(iso: string): string {
   });
 }
 
-type RefundRequest =
-  Route.ComponentProps["loaderData"]["refundRequests"][number];
+type RefundRequest = Route.ComponentProps["loaderData"]["refundRequests"][number];
 
 function RefundRequestCard({ request }: { request: RefundRequest }) {
   const fetcher = useFetcher<typeof action>();
@@ -304,7 +303,8 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           : "Only admins can access this page.";
     } else {
       title = `Error ${error.status}`;
-      message = typeof error.data === "string" ? error.data : error.statusText;
+      message =
+        typeof error.data === "string" ? error.data : error.statusText;
     }
   }
 

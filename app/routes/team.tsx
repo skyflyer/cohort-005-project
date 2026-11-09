@@ -60,6 +60,7 @@ interface CouponRow {
   courseId: number;
   courseTitle: string;
   redeemedByEmail: string | null;
+  voided: boolean;
   createdAt: string;
 }
 
@@ -99,7 +100,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     }
   >();
 
-  for (const coupon of allCoupons) {
+  // Voided seats (their purchase was refunded) are not seats the team has, so
+  // they stay out of the per-course totals; the list below still shows them.
+  for (const coupon of allCoupons.filter((c) => c.voidedAt === null)) {
     if (!courseMap.has(coupon.courseId)) {
       const course = getCourseById(coupon.courseId);
       courseMap.set(coupon.courseId, {
@@ -141,6 +144,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       courseId: coupon.courseId,
       courseTitle: course?.title ?? "Unknown Course",
       redeemedByEmail,
+      voided: coupon.voidedAt !== null,
       createdAt: coupon.createdAt,
     };
   });
@@ -292,7 +296,11 @@ export default function Team({ loaderData }: Route.ComponentProps) {
                       {coupon.courseTitle}
                     </td>
                     <td className="px-4 py-3">
-                      {coupon.redeemedByEmail ? (
+                      {coupon.voided ? (
+                        <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                          Voided (refunded)
+                        </span>
+                      ) : coupon.redeemedByEmail ? (
                         <span className="text-muted-foreground">
                           Claimed by {coupon.redeemedByEmail}
                         </span>
@@ -303,7 +311,7 @@ export default function Team({ loaderData }: Route.ComponentProps) {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      {!coupon.redeemedByEmail && (
+                      {!coupon.voided && !coupon.redeemedByEmail && (
                         <CopyButton code={coupon.code} />
                       )}
                     </td>

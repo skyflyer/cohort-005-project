@@ -5,6 +5,7 @@ import {
   gte,
   inArray,
   isNotNull,
+  isNull,
   notExists,
   sql,
   sum,
@@ -368,7 +369,9 @@ export function getStudentRevenue(
 
   const studentIds = students.map((student) => student.userId);
 
-  // Correlated: did this purchase mint seats for other people?
+  // Correlated: did this purchase mint seats for other people? Voided seats
+  // count too: a refunded team purchase still minted them, so it stays a team
+  // purchase and is never credited to the buyer as a solo one.
   const mintedSeats = database
     .select({ one: sql`1` })
     .from(coupons)
@@ -390,7 +393,8 @@ export function getStudentRevenue(
 
   // A team purchase can only be refunded while no seat has been claimed, and
   // an unclaimed one is not attributed to any student's paid total — so its
-  // refund is rightly absent from the per-student figures too.
+  // refund is rightly absent from the per-student figures too. That holds only
+  // because approval voids the seat codes instead of deleting them.
   const approved = approvedRefunds(
     database,
     and(
@@ -536,7 +540,8 @@ export function getTopBuyers(
     .select({
       userId: purchases.userId,
       bought: count(coupons.id),
-      unredeemed: sql<number>`sum(case when ${coupons.redeemedByUserId} is null then 1 else 0 end)`,
+      // A voided seat is not available to anyone.
+      unredeemed: sql<number>`sum(case when ${coupons.redeemedByUserId} is null and ${coupons.voidedAt} is null then 1 else 0 end)`,
     })
     .from(coupons)
     .innerJoin(purchases, eq(coupons.purchaseId, purchases.id))
@@ -544,6 +549,9 @@ export function getTopBuyers(
     .where(
       and(
         inArray(purchases.userId, buyerIds),
+        // Spend is net of refunds, so seats are too: voided seats belong to a
+        // refunded purchase and are not counted as bought.
+        isNull(coupons.voidedAt),
         purchaseScope(instructorId, range)
       )
     )

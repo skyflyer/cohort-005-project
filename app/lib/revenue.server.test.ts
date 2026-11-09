@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
@@ -9,6 +10,7 @@ import {
   getStudentRevenue,
   getTopBuyers,
 } from "./revenue.server";
+import { approveRefundRequest } from "./refund-requests.server";
 
 const NOW = new Date("2026-11-09T12:00:00.000Z");
 const daysAgo = (days: number) =>
@@ -415,6 +417,89 @@ describe("getCourseRevenueByCountry", () => {
     expect(getCourseRevenueByCountry(course.id, "30d", testDb)).toMatchObject({
       refundsCents: 0,
       netCents: 8000,
+    });
+  });
+});
+
+describe("a team purchase refunded through approveRefundRequest", () => {
+  function setupRefundedTeamPurchase() {
+    const { testDb, user, instructor, course, buy } = setup();
+    testDb
+      .update(schema.courses)
+      .set({ price: 10000 })
+      .where(eq(schema.courses.id, course.id))
+      .run();
+    const admin = testDb
+      .insert(schema.users)
+      .values({
+        name: "Ada Admin",
+        email: "admin@example.com",
+        role: schema.UserRole.Admin,
+      })
+      .returning()
+      .get();
+    // The buyer stays a student of the instructor through a second course.
+    const other = testDb
+      .insert(schema.courses)
+      .values({
+        title: "Other",
+        slug: "other",
+        description: "Other",
+        salesCopy: "Other",
+        instructorId: instructor.id,
+        categoryId: course.categoryId,
+        status: schema.CourseStatus.Published,
+      })
+      .returning()
+      .get();
+    testDb
+      .insert(schema.enrollments)
+      .values({ userId: user.id, courseId: other.id })
+      .run();
+
+    const purchase = buy(10000, daysAgo(5));
+    const team = testDb.insert(schema.teams).values({}).returning().get();
+    for (const code of ["A", "B", "C"]) {
+      testDb
+        .insert(schema.coupons)
+        .values({
+          teamId: team.id,
+          courseId: course.id,
+          code,
+          purchaseId: purchase.id,
+        })
+        .run();
+    }
+    const refund = testDb
+      .insert(schema.refunds)
+      .values({ purchaseId: purchase.id, reason: "Changed my mind" })
+      .returning()
+      .get();
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    return { testDb, user, instructor };
+  }
+
+  it("is still treated as a team purchase in per-student totals", () => {
+    const { testDb, user, instructor } = setupRefundedTeamPurchase();
+
+    const totals = getStudentRevenue(instructor.id, "all", testDb);
+
+    expect(totals).toEqual([
+      { userId: user.id, name: user.name, revenueCents: 0 },
+    ]);
+  });
+
+  it("does not count its voided seats as bought or available", () => {
+    const { testDb, user, instructor } = setupRefundedTeamPurchase();
+
+    const [buyer] = getTopBuyers(instructor.id, "all", testDb);
+
+    expect(buyer).toMatchObject({
+      userId: user.id,
+      spendCents: 0,
+      seatsBought: 0,
+      seatsUnredeemed: 0,
     });
   });
 });

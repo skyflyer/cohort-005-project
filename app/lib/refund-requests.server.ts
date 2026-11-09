@@ -1,37 +1,34 @@
 import { data } from "react-router";
-import { and, asc, count, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
-  courseRatings,
   courses,
-  enrollments,
-  lessonProgress,
   purchases,
-  quizAnswers,
-  quizAttempts,
-  quizzes,
   refunds,
   RefundStatus,
   users,
 } from "~/db/schema";
 import {
-  getCourseLessonIds,
   getRefundableAmount,
   hasClaimedSeat,
   getWatchedSeconds,
   hasWatchedTooMuch,
 } from "~/lib/refund-rules.server";
+import {
+  countLessonsWithProgress,
+  deleteLearnerCourseData,
+} from "~/lib/learner-course-data.server";
+import type { Database, DatabaseReader } from "~/lib/database-types";
 import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
 import { formatPrice } from "~/lib/utils";
 
 // Takes the database as a last argument (defaulting to the app database) so tests can pass an in-memory one.
-type Database = typeof db;
 
 // Both the review list and the decline action start from a refund joined to
 // its purchase, learner and course. Takes anything that can select, so it
 // also works on the transaction handle.
-function selectRefundsWithContext(reader: Pick<Database, "select">) {
+function selectRefundsWithContext(reader: DatabaseReader) {
   return reader
     .select({
       id: refunds.id,
@@ -53,28 +50,6 @@ function selectRefundsWithContext(reader: Pick<Database, "select">) {
     .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
     .innerJoin(users, eq(purchases.userId, users.id))
     .innerJoin(courses, eq(purchases.courseId, courses.id));
-}
-
-/** How many lessons of the course the learner has a progress row for. */
-function countLessonsWithProgress(
-  userId: number,
-  courseId: number,
-  database: Pick<Database, "select">
-): number {
-  const lessonIds = getCourseLessonIds(courseId, database);
-  if (lessonIds.length === 0) return 0;
-
-  const row = database
-    .select({ lessons: count() })
-    .from(lessonProgress)
-    .where(
-      and(
-        eq(lessonProgress.userId, userId),
-        inArray(lessonProgress.lessonId, lessonIds)
-      )
-    )
-    .get();
-  return row?.lessons ?? 0;
 }
 
 /**
@@ -288,6 +263,13 @@ export function approveRefundRequest(
       throw data("Refund request not found", { status: 404 });
     }
 
+    // Resolved requests are reported as such before anything else.
+    if (found.status !== RefundStatus.Requested) {
+      throw data("This refund request has already been resolved.", {
+        status: 409,
+      });
+    }
+
     if (hasClaimedSeat(found.purchaseId, tx)) {
       throw data(
         "A team seat on this purchase has been claimed, so the refund cannot be approved.",
@@ -324,61 +306,16 @@ export function approveRefundRequest(
       });
     }
 
-    const lessonIds = getCourseLessonIds(found.courseId, tx);
-    if (lessonIds.length > 0) {
-      const attemptIds = tx
-        .select({ id: quizAttempts.id })
-        .from(quizAttempts)
-        .innerJoin(quizzes, eq(quizAttempts.quizId, quizzes.id))
-        .where(
-          and(
-            eq(quizAttempts.userId, found.learnerId),
-            inArray(quizzes.lessonId, lessonIds)
-          )
-        )
-        .all()
-        .map((row) => row.id);
+    deleteLearnerCourseData(tx, found.learnerId, found.courseId);
 
-      // Answers go before the attempts they point at.
-      if (attemptIds.length > 0) {
-        tx.delete(quizAnswers)
-          .where(inArray(quizAnswers.attemptId, attemptIds))
-          .run();
-        tx.delete(quizAttempts)
-          .where(inArray(quizAttempts.id, attemptIds))
-          .run();
-      }
-
-      tx.delete(lessonProgress)
-        .where(
-          and(
-            eq(lessonProgress.userId, found.learnerId),
-            inArray(lessonProgress.lessonId, lessonIds)
-          )
-        )
-        .run();
-    }
-
-    tx.delete(courseRatings)
+    // Void rather than delete: the rows record that this purchase minted
+    // seats. No seat was claimed (checked above), so all of them are unredeemed.
+    tx.update(coupons)
+      .set({ voidedAt: new Date().toISOString() })
       .where(
-        and(
-          eq(courseRatings.userId, found.learnerId),
-          eq(courseRatings.courseId, found.courseId)
-        )
+        and(eq(coupons.purchaseId, found.purchaseId), isNull(coupons.voidedAt))
       )
       .run();
-
-    tx.delete(enrollments)
-      .where(
-        and(
-          eq(enrollments.userId, found.learnerId),
-          eq(enrollments.courseId, found.courseId)
-        )
-      )
-      .run();
-
-    // No seat was claimed (checked above), so every code is unredeemed.
-    tx.delete(coupons).where(eq(coupons.purchaseId, found.purchaseId)).run();
 
     return { ...found, amountRefunded };
   });

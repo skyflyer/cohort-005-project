@@ -11,17 +11,22 @@ import {
 import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
 import { checkPppAccess } from "~/lib/ppp";
+import type { Database } from "~/lib/database-types";
 
-function getUserById(id: number) {
-  return db.select().from(users).where(eq(users.id, id)).get();
+function getUserById(id: number, database: Database = db) {
+  return database.select().from(users).where(eq(users.id, id)).get();
 }
 
-function getCourseById(id: number) {
-  return db.select().from(courses).where(eq(courses.id, id)).get();
+function getCourseById(id: number, database: Database = db) {
+  return database.select().from(courses).where(eq(courses.id, id)).get();
 }
 
-function findEnrollment(userId: number, courseId: number) {
-  return db
+function findEnrollment(
+  userId: number,
+  courseId: number,
+  database: Database = db
+) {
+  return database
     .select()
     .from(enrollments)
     .where(
@@ -30,12 +35,20 @@ function findEnrollment(userId: number, courseId: number) {
     .get();
 }
 
-function isUserEnrolled(userId: number, courseId: number) {
-  return !!findEnrollment(userId, courseId);
+function isUserEnrolled(
+  userId: number,
+  courseId: number,
+  database: Database = db
+) {
+  return !!findEnrollment(userId, courseId, database);
 }
 
-function findPurchase(userId: number, courseId: number) {
-  return db
+function findPurchase(
+  userId: number,
+  courseId: number,
+  database: Database = db
+) {
+  return database
     .select()
     .from(purchases)
     .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
@@ -85,19 +98,20 @@ const SIGNED_OUT: Access = {
 
 export async function getAccess(
   request: Request,
-  courseId: number
+  courseId: number,
+  database: Database = db
 ): Promise<Access> {
   const userId = await getCurrentUserId(request);
   if (!userId) return SIGNED_OUT;
 
-  const user = getUserById(userId);
+  const user = getUserById(userId, database);
   if (!user) return SIGNED_OUT;
 
-  const course = getCourseById(courseId);
+  const course = getCourseById(courseId, database);
   const isAdmin = user.role === UserRole.Admin;
   const isOwningInstructor = course?.instructorId === userId;
   const isStaff = isAdmin || isOwningInstructor;
-  const enrolled = isUserEnrolled(userId, courseId);
+  const enrolled = isUserEnrolled(userId, courseId, database);
 
   // PPP only restricts students who bought at a discount — staff are exempt.
   let ppp = {
@@ -107,7 +121,7 @@ export async function getAccess(
   };
 
   if (enrolled && !isStaff && course) {
-    const purchase = findPurchase(userId, courseId);
+    const purchase = findPurchase(userId, courseId, database);
     const currentCountry = await resolveCountry(request);
     ppp = checkPppAccess(
       course.price,

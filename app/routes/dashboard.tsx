@@ -11,30 +11,13 @@ import {
 } from "~/db/schema";
 import { eq, and, or, sql } from "drizzle-orm";
 import { getCurrentUserId } from "~/lib/session";
+import { getUserEnrolledCourses } from "~/lib/enrollments.server";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import { AlertTriangle, BookOpen, CheckCircle2, GraduationCap, PlayCircle } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
-
-function getUserEnrolledCourses(userId: number) {
-  return db
-    .select({
-      enrollmentId: enrollments.id,
-      courseId: enrollments.courseId,
-      enrolledAt: enrollments.enrolledAt,
-      completedAt: enrollments.completedAt,
-      courseTitle: courses.title,
-      courseSlug: courses.slug,
-      courseDescription: courses.description,
-      coverImageUrl: courses.coverImageUrl,
-    })
-    .from(enrollments)
-    .innerJoin(courses, eq(enrollments.courseId, courses.id))
-    .where(eq(enrollments.userId, userId))
-    .all();
-}
 
 function getCourseLessonIds(courseId: number): number[] {
   const courseModules = db

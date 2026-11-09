@@ -11,6 +11,7 @@ import {
   purchases,
 } from "~/db/schema";
 import { getDiscountForCountry } from "~/lib/ppp";
+import type { Database, DatabaseReader } from "~/lib/database-types";
 
 export const REFUND_WINDOW_DAYS = 14;
 export const MAX_WATCHED_HOURS = 2;
@@ -18,9 +19,6 @@ export const MAX_WATCHED_HOURS = 2;
 // Server-side refund rules, shared by everything that handles refund
 // requests. Functions that read the database take it as a last argument
 // (defaulting to the app database) so tests can pass an in-memory one.
-type Database = typeof db;
-// Read-only helpers also accept a transaction handle.
-type Reader = Pick<Database, "select">;
 
 /**
  * A purchase made at a purchasing-power price is given back at what was paid,
@@ -58,7 +56,7 @@ export function isWithinRefundWindow(
 /** The ids of every lesson in a course. */
 export function getCourseLessonIds(
   courseId: number,
-  database: Reader = db
+  database: DatabaseReader = db
 ): number[] {
   return database
     .select({ id: lessons.id })
@@ -105,7 +103,7 @@ export function getWatchedSeconds(
 /** Whether any seat of a team purchase has been claimed. */
 export function hasClaimedSeat(
   purchaseId: number,
-  database: Reader = db
+  database: DatabaseReader = db
 ): boolean {
   const seat = database
     .select({ id: coupons.id })
