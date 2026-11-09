@@ -17,11 +17,10 @@ import {
   getRefundableAmount,
   getWatchedSeconds,
   hasClaimedSeat,
+  hasWatchedTooMuch,
   isWithinRefundWindow,
 } from "~/lib/refund-rules.server";
 import { formatPrice } from "~/lib/utils";
-
-const MAX_WATCHED_HOURS = 2;
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
@@ -137,7 +136,7 @@ export async function action({ params, request }: Route.ActionArgs) {
 
   const watchedSeconds = getWatchedSeconds(currentUserId, course.id);
 
-  if (watchedSeconds >= MAX_WATCHED_HOURS * 60 * 60) {
+  if (hasWatchedTooMuch(watchedSeconds)) {
     throw data("You have watched too much of this course to cancel it.", {
       status: 403,
     });

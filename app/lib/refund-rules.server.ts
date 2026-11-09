@@ -11,6 +11,7 @@ import {
 import { getDiscountForCountry } from "~/lib/ppp";
 
 export const REFUND_WINDOW_DAYS = 14;
+export const MAX_WATCHED_HOURS = 2;
 
 // Server-side refund rules, shared by everything that handles refund
 // requests. Functions that read the database take it as a last argument
@@ -94,4 +95,9 @@ export function hasClaimedSeat(
     .where(and(eq(coupons.purchaseId, purchaseId), isNotNull(coupons.redeemedAt)))
     .get();
   return seat !== undefined;
+}
+
+/** A learner who has watched this much of a course can no longer get a refund. */
+export function hasWatchedTooMuch(watchedSeconds: number): boolean {
+  return watchedSeconds >= MAX_WATCHED_HOURS * 60 * 60;
 }

@@ -1,16 +1,19 @@
 import { describe, it, expect } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
+import { getDiscountForCountry } from "~/lib/ppp";
 import {
   getRefundableAmount,
   isWithinRefundWindow,
   getWatchedSeconds,
   hasClaimedSeat,
+  hasWatchedTooMuch,
 } from "./refund-rules.server";
 
 describe("getRefundableAmount", () => {
   it("gives back what was paid for a purchasing-power purchase", () => {
-    // India is a 50% tier; the learner paid 5000 on a 10000 course
+    // India is a discounted PPP country; the learner paid 5000 on a 10000 course
+    expect(getDiscountForCountry("IN")).toBeGreaterThan(0);
     expect(
       getRefundableAmount({ amountPaid: 5000, country: "IN" }, { price: 10000 })
     ).toBe(5000);
@@ -19,6 +22,13 @@ describe("getRefundableAmount", () => {
   it("gives back the list price for a non-PPP purchase", () => {
     expect(
       getRefundableAmount({ amountPaid: 9000, country: "US" }, { price: 10000 })
+    ).toBe(10000);
+  });
+
+  it("gives back the list price, not a coupon-reduced amount paid, for a non-PPP purchase", () => {
+    expect(getDiscountForCountry("US")).toBe(0);
+    expect(
+      getRefundableAmount({ amountPaid: 7000, country: "US" }, { price: 10000 })
     ).toBe(10000);
   });
 
@@ -61,12 +71,12 @@ describe("getWatchedSeconds", () => {
   function setup() {
     const testDb = createTestDb();
     const { user, course } = seedBaseData(testDb);
-    const mod = testDb
+    const courseModule = testDb
       .insert(schema.modules)
       .values({ courseId: course.id, title: "M", position: 1 })
       .returning()
       .get();
-    const addLesson = (position: number, courseModuleId = mod.id) =>
+    const addLesson = (position: number, courseModuleId = courseModule.id) =>
       testDb
         .insert(schema.lessons)
         .values({ moduleId: courseModuleId, title: `L${position}`, position })
@@ -191,5 +201,15 @@ describe("hasClaimedSeat", () => {
     addSeat("A", null);
     addSeat("B", new Date().toISOString());
     expect(hasClaimedSeat(purchase.id, testDb)).toBe(true);
+  });
+});
+
+describe("hasWatchedTooMuch", () => {
+  it("is false just under 2 hours", () => {
+    expect(hasWatchedTooMuch(2 * 60 * 60 - 1)).toBe(false);
+  });
+
+  it("is true at exactly 2 hours", () => {
+    expect(hasWatchedTooMuch(2 * 60 * 60)).toBe(true);
   });
 });
