@@ -3,9 +3,9 @@ import { getSeatCodeStatus } from "./seat-codes.server";
 
 describe("getSeatCodeStatus", () => {
   it("accepts a code nobody has redeemed or voided", () => {
-    expect(
-      getSeatCodeStatus({ redeemedByUserId: null, voidedAt: null })
-    ).toEqual({ redeemable: true });
+    const coupon = { redeemedByUserId: null, voidedAt: null };
+
+    expect(getSeatCodeStatus(coupon)).toEqual({ redeemable: true, coupon });
   });
 
   it("refuses a missing code", () => {

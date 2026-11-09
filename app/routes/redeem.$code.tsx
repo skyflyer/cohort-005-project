@@ -44,14 +44,11 @@ function redeemCoupon(
   userId: number,
   userCountry: string
 ): RedeemResult {
-  const coupon = getCouponByCode(code);
-  const status = getSeatCodeStatus(coupon);
-  if (!status.redeemable || !coupon) {
-    return {
-      ok: false,
-      error: status.redeemable ? "Coupon not found" : status.message,
-    };
+  const status = getSeatCodeStatus(getCouponByCode(code));
+  if (!status.redeemable) {
+    return { ok: false, error: status.message };
   }
+  const { coupon } = status;
 
   const existingEnrollment = db
     .select()
@@ -135,8 +132,9 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Course not found.", { status: 404 });
   }
 
-  const voided = coupon.voidedAt !== null;
-  const alreadyRedeemed = !voided && coupon.redeemedByUserId !== null;
+  const status = getSeatCodeStatus(coupon);
+  const voided = !status.redeemable && status.reason === "voided";
+  const alreadyRedeemed = !status.redeemable && status.reason === "redeemed";
   const alreadyEnrolled = isUserEnrolled(currentUserId, coupon.courseId);
 
   // Check country mismatch upfront so we can show a clear message

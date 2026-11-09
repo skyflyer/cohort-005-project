@@ -2,8 +2,6 @@ import { Link } from "react-router";
 import type { Route } from "./+types/dashboard";
 import { db } from "~/db";
 import {
-  enrollments,
-  courses,
   modules,
   lessons,
   lessonProgress,

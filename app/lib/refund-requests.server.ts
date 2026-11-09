@@ -23,8 +23,6 @@ import type { Database, DatabaseReader } from "~/lib/database-types";
 import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
 import { formatPrice } from "~/lib/utils";
 
-// Takes the database as a last argument (defaulting to the app database) so tests can pass an in-memory one.
-
 // Both the review list and the decline action start from a refund joined to
 // its purchase, learner and course. Takes anything that can select, so it
 // also works on the transaction handle.
@@ -246,7 +244,7 @@ export function buildRefundApprovalEmail(input: {
  * Approves an open refund request (ADR 0001). In one transaction: marks the
  * refund approved at the refundable amount, deletes the learner's enrollment,
  * lesson progress, quiz attempts and answers, and rating for the course,
- * and deletes the purchase's unredeemed seat codes so they stop working.
+ * and voids the purchase's unredeemed seat codes so they stop working.
  * Watch history and comments are kept. Refused if a seat was claimed.
  * Returns the approval email for the caller to send.
  */

@@ -1,7 +1,12 @@
 import type { coupons } from "~/db/schema";
 
-export type SeatCodeStatus =
-  | { redeemable: true }
+type SeatCode = Pick<
+  typeof coupons.$inferSelect,
+  "redeemedByUserId" | "voidedAt"
+>;
+
+export type SeatCodeStatus<T extends SeatCode = SeatCode> =
+  | { redeemable: true; coupon: T }
   | {
       redeemable: false;
       reason: "not_found" | "voided" | "redeemed";
@@ -12,12 +17,9 @@ export type SeatCodeStatus =
  * Whether a team seat code can be redeemed right now. A voided code (its
  * purchase was refunded) is reported before a redeemed one.
  */
-export function getSeatCodeStatus(
-  coupon:
-    | Pick<typeof coupons.$inferSelect, "redeemedByUserId" | "voidedAt">
-    | null
-    | undefined
-): SeatCodeStatus {
+export function getSeatCodeStatus<T extends SeatCode>(
+  coupon: T | null | undefined
+): SeatCodeStatus<T> {
   if (!coupon) {
     return {
       redeemable: false,
@@ -40,5 +42,5 @@ export function getSeatCodeStatus(
       message: "Coupon has already been redeemed",
     };
   }
-  return { redeemable: true };
+  return { redeemable: true, coupon };
 }
