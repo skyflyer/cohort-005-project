@@ -96,8 +96,8 @@ describe("getOpenRefundRequests", () => {
       refundableAmount: 10000,
       reason: "It was not what I expected.",
       watchedSecondsAtRequest: 600,
-      watchedSecondsNow: 8000,
-      watchedTooMuchNow: true,
+      currentWatchedSeconds: 8000,
+      isOverWatchLimitNow: true,
     });
   });
 
@@ -106,7 +106,7 @@ describe("getOpenRefundRequests", () => {
     request();
     watch(7199, LATER);
 
-    expect(getOpenRefundRequests(testDb)[0].watchedTooMuchNow).toBe(false);
+    expect(getOpenRefundRequests(testDb)[0].isOverWatchLimitNow).toBe(false);
   });
 
   it("leaves out requests that are already resolved", () => {
@@ -216,5 +216,25 @@ describe("declineRefundRequest", () => {
 
     expect(testDb.select().from(schema.enrollments).all()).toHaveLength(1);
     expect(testDb.select().from(schema.lessonProgress).all()).toHaveLength(1);
+  });
+});
+
+describe("declineRefundRequest when the request is resolved meanwhile", () => {
+  it("does not overwrite an earlier decision", () => {
+    const { testDb, admin, request } = setup();
+    const refund = request();
+    declineRefundRequest(
+      { refundId: refund.id, adminId: admin.id, declineMessage: "First." },
+      testDb
+    );
+
+    expect(() =>
+      declineRefundRequest(
+        { refundId: refund.id, adminId: admin.id, declineMessage: "Second." },
+        testDb
+      )
+    ).toThrow();
+    const after = testDb.select().from(schema.refunds).get();
+    expect(after?.declineMessage).toBe("First.");
   });
 });

@@ -205,9 +205,16 @@ export async function requireInstructorOrAdmin(request: Request) {
  * Throws 401 when signed out, 403 unless the user is an admin. Use in actions
  * as well as loaders — loader guards don't protect actions.
  */
-export async function requireAdmin(request: Request) {
+export async function requireAdmin(
+  request: Request,
+  database: typeof db = db
+) {
   const userId = await requireUserId(request);
-  const user = getUserById(userId);
+  const user = database
+    .select()
+    .from(users)
+    .where(eq(users.id, userId))
+    .get();
 
   if (!user || user.role !== UserRole.Admin) {
     throw data("Only admins can access this page.", { status: 403 });

@@ -17,6 +17,7 @@ import {
   getRefundableAmount,
   getWatchedSeconds,
   hasClaimedSeat,
+  hasOpenRefundRequest,
   hasWatchedTooMuch,
   isWithinRefundWindow,
 } from "~/lib/refund-rules.server";
@@ -44,19 +45,6 @@ function getLatestPurchase(userId: number, courseId: number) {
     .from(purchases)
     .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
     .orderBy(sql`${purchases.createdAt} desc`)
-    .get();
-}
-
-function getOpenRefund(purchaseId: number) {
-  return db
-    .select()
-    .from(refunds)
-    .where(
-      and(
-        eq(refunds.purchaseId, purchaseId),
-        eq(refunds.status, RefundStatus.Requested)
-      )
-    )
     .get();
 }
 
@@ -116,7 +104,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("You have not bought this course.", { status: 403 });
   }
 
-  if (getOpenRefund(purchase.id)) {
+  if (hasOpenRefundRequest(purchase.id)) {
     throw data("You already have a request open on this purchase.", {
       status: 409,
     });

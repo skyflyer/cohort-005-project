@@ -7,6 +7,7 @@ import {
   isWithinRefundWindow,
   getWatchedSeconds,
   hasClaimedSeat,
+  hasOpenRefundRequest,
   hasWatchedTooMuch,
 } from "./refund-rules.server";
 
@@ -93,12 +94,12 @@ describe("getWatchedSeconds", () => {
   it("is zero when nothing was watched", () => {
     const { testDb, user, course, addLesson } = setup();
     addLesson(1);
-    expect(getWatchedSeconds(user.id, course.id, testDb)).toBe(0);
+    expect(getWatchedSeconds(user.id, course.id, undefined, testDb)).toBe(0);
   });
 
   it("is zero for a course with no lessons", () => {
     const { testDb, user, course } = setup();
-    expect(getWatchedSeconds(user.id, course.id, testDb)).toBe(0);
+    expect(getWatchedSeconds(user.id, course.id, undefined, testDb)).toBe(0);
   });
 
   it("sums the furthest position reached in each lesson", () => {
@@ -111,7 +112,7 @@ describe("getWatchedSeconds", () => {
     watch(a.id, 200);
     watch(b.id, 50);
     watch(c.id, 25.5);
-    expect(getWatchedSeconds(user.id, course.id, testDb)).toBe(375.5);
+    expect(getWatchedSeconds(user.id, course.id, undefined, testDb)).toBe(375.5);
   });
 
   it("ignores other learners and other courses", () => {
@@ -151,7 +152,7 @@ describe("getWatchedSeconds", () => {
     const otherLesson = addLesson(1, otherMod.id);
     watch(otherLesson.id, 500);
 
-    expect(getWatchedSeconds(user.id, course.id, testDb)).toBe(120);
+    expect(getWatchedSeconds(user.id, course.id, undefined, testDb)).toBe(120);
   });
 
   it("counts only events created at or before the cutoff", () => {
@@ -173,9 +174,14 @@ describe("getWatchedSeconds", () => {
     watchAt(900, "2026-11-03T10:00:00.000Z");
 
     expect(
-      getWatchedSeconds(user.id, course.id, testDb, "2026-11-02T10:00:00.000Z")
+      getWatchedSeconds(
+        user.id,
+        course.id,
+        "2026-11-02T10:00:00.000Z",
+        testDb
+      )
     ).toBe(300);
-    expect(getWatchedSeconds(user.id, course.id, testDb)).toBe(900);
+    expect(getWatchedSeconds(user.id, course.id, undefined, testDb)).toBe(900);
   });
 });
 
@@ -235,5 +241,40 @@ describe("hasWatchedTooMuch", () => {
 
   it("is true at exactly 2 hours", () => {
     expect(hasWatchedTooMuch(2 * 60 * 60)).toBe(true);
+  });
+});
+
+describe("hasOpenRefundRequest", () => {
+  function setup() {
+    const testDb = createTestDb();
+    const { user, course } = seedBaseData(testDb);
+    const purchase = testDb
+      .insert(schema.purchases)
+      .values({ userId: user.id, courseId: course.id, amountPaid: 1000 })
+      .returning()
+      .get();
+    const request = (status: schema.RefundStatus) =>
+      testDb
+        .insert(schema.refunds)
+        .values({ purchaseId: purchase.id, status, reason: "Not for me." })
+        .run();
+    return { testDb, purchase, request };
+  }
+
+  it("is false when no request was made", () => {
+    const { testDb, purchase } = setup();
+    expect(hasOpenRefundRequest(purchase.id, testDb)).toBe(false);
+  });
+
+  it("is true while a request waits for a decision", () => {
+    const { testDb, purchase, request } = setup();
+    request(schema.RefundStatus.Requested);
+    expect(hasOpenRefundRequest(purchase.id, testDb)).toBe(true);
+  });
+
+  it("is false after the request was declined, so the learner can ask again", () => {
+    const { testDb, purchase, request } = setup();
+    request(schema.RefundStatus.Declined);
+    expect(hasOpenRefundRequest(purchase.id, testDb)).toBe(false);
   });
 });

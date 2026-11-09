@@ -17,15 +17,14 @@ import {
 // Takes the database as a last argument (defaulting to the app database) so tests can pass an in-memory one.
 type Database = typeof db;
 
-/**
- * Every refund request still waiting for a decision, oldest first, with what
- * an admin needs to decide: the watch time when the learner asked and the
- * watch time now. Nothing here blocks a request — the admin decides.
- */
-export function getOpenRefundRequests(database: Database = db) {
-  const rows = database
+// Both the review list and the decline action start from a refund joined to
+// its purchase, learner and course. Takes anything that can select, so it
+// also works on the transaction handle.
+function selectRefundsWithContext(reader: Pick<Database, "select">) {
+  return reader
     .select({
       id: refunds.id,
+      status: refunds.status,
       reason: refunds.reason,
       requestedAt: refunds.requestedAt,
       learnerId: users.id,
@@ -33,23 +32,33 @@ export function getOpenRefundRequests(database: Database = db) {
       learnerEmail: users.email,
       courseId: courses.id,
       courseTitle: courses.title,
+      coursePrice: courses.price,
       purchasedAt: purchases.createdAt,
       amountPaid: purchases.amountPaid,
       country: purchases.country,
-      coursePrice: courses.price,
     })
     .from(refunds)
     .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
     .innerJoin(users, eq(purchases.userId, users.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id));
+}
+
+/**
+ * Every refund request still waiting for a decision, oldest first, with what
+ * an admin needs to decide: the watch time when the learner asked and the
+ * watch time now. Nothing here blocks a request — the admin decides.
+ */
+export function getOpenRefundRequests(database: Database = db) {
+  const rows = selectRefundsWithContext(database)
     .where(eq(refunds.status, RefundStatus.Requested))
     .orderBy(asc(refunds.requestedAt), asc(refunds.id))
     .all();
 
   return rows.map((row) => {
-    const watchedSecondsNow = getWatchedSeconds(
+    const currentWatchedSeconds = getWatchedSeconds(
       row.learnerId,
       row.courseId,
+      undefined,
       database
     );
     return {
@@ -67,11 +76,11 @@ export function getOpenRefundRequests(database: Database = db) {
       watchedSecondsAtRequest: getWatchedSeconds(
         row.learnerId,
         row.courseId,
-        database,
-        row.requestedAt
+        row.requestedAt,
+        database
       ),
-      watchedSecondsNow,
-      watchedTooMuchNow: hasWatchedTooMuch(watchedSecondsNow),
+      currentWatchedSeconds,
+      isOverWatchLimitNow: hasWatchedTooMuch(currentWatchedSeconds),
     };
   });
 }
@@ -118,45 +127,41 @@ export function declineRefundRequest(
     throw data("A decline message is required.", { status: 400 });
   }
 
-  const refund = database
-    .select({
-      learnerName: users.name,
-      learnerEmail: users.email,
-      courseTitle: courses.title,
-      status: refunds.status,
-    })
-    .from(refunds)
-    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
-    .innerJoin(users, eq(purchases.userId, users.id))
-    .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(eq(refunds.id, input.refundId))
-    .get();
+  // Read and update in one transaction, and only update a row that is still
+  // open, so two admins resolving the same request cannot both succeed.
+  const refund = database.transaction((tx) => {
+    const found = selectRefundsWithContext(tx)
+      .where(eq(refunds.id, input.refundId))
+      .get();
 
-  if (!refund) {
-    throw data("Refund request not found", { status: 404 });
-  }
+    if (!found) {
+      throw data("Refund request not found", { status: 404 });
+    }
 
-  if (refund.status !== RefundStatus.Requested) {
-    throw data("This refund request has already been resolved.", {
-      status: 409,
-    });
-  }
-
-  database
-    .update(refunds)
-    .set({
-      status: RefundStatus.Declined,
-      declineMessage,
-      resolvedAt: new Date().toISOString(),
-      resolvedByUserId: input.adminId,
-    })
-    .where(
-      and(
-        eq(refunds.id, input.refundId),
-        eq(refunds.status, RefundStatus.Requested)
+    const updated = tx
+      .update(refunds)
+      .set({
+        status: RefundStatus.Declined,
+        declineMessage,
+        resolvedAt: new Date().toISOString(),
+        resolvedByUserId: input.adminId,
+      })
+      .where(
+        and(
+          eq(refunds.id, input.refundId),
+          eq(refunds.status, RefundStatus.Requested)
+        )
       )
-    )
-    .run();
+      .run();
+
+    if (updated.changes !== 1) {
+      throw data("This refund request has already been resolved.", {
+        status: 409,
+      });
+    }
+
+    return found;
+  });
 
   return {
     email: buildRefundDeclineEmail({

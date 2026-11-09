@@ -2,6 +2,8 @@ import { and, eq, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
+  refunds,
+  RefundStatus,
   lessons,
   modules,
   videoWatchEvents,
@@ -67,14 +69,14 @@ export function getCourseLessonIds(
 
 /**
  * Sum of the furthest position the learner reached in each lesson of the
- * course. With `until` (an ISO timestamp), only watch events created at or
+ * course. With `asOf` (an ISO timestamp), only watch events created at or
  * before it count — the watch time as it stood at that moment.
  */
 export function getWatchedSeconds(
   userId: number,
   courseId: number,
-  database: Database = db,
-  until?: string
+  asOf?: string,
+  database: Database = db
 ): number {
   const lessonIds = getCourseLessonIds(courseId, database);
 
@@ -89,7 +91,7 @@ export function getWatchedSeconds(
       and(
         eq(videoWatchEvents.userId, userId),
         inArray(videoWatchEvents.lessonId, lessonIds),
-        until === undefined ? undefined : lte(videoWatchEvents.createdAt, until)
+        asOf === undefined ? undefined : lte(videoWatchEvents.createdAt, asOf)
       )
     )
     .groupBy(videoWatchEvents.lessonId)
@@ -114,4 +116,22 @@ export function hasClaimedSeat(
 /** A learner who has watched this much of a course can no longer get a refund. */
 export function hasWatchedTooMuch(watchedSeconds: number): boolean {
   return watchedSeconds >= MAX_WATCHED_HOURS * 60 * 60;
+}
+
+/** Whether the purchase has a refund request still waiting for a decision. */
+export function hasOpenRefundRequest(
+  purchaseId: number,
+  database: Database = db
+): boolean {
+  const open = database
+    .select({ id: refunds.id })
+    .from(refunds)
+    .where(
+      and(
+        eq(refunds.purchaseId, purchaseId),
+        eq(refunds.status, RefundStatus.Requested)
+      )
+    )
+    .get();
+  return open !== undefined;
 }

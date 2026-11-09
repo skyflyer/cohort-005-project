@@ -10,6 +10,7 @@ import {
   declineRefundRequest,
   getOpenRefundRequests,
 } from "~/lib/refund-requests.server";
+import { MAX_DECLINE_MESSAGE_LENGTH } from "~/lib/refund-limits";
 import { MAX_WATCHED_HOURS } from "~/lib/refund-rules.server";
 import { formatPrice } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
@@ -24,7 +25,10 @@ const adminRefundActionSchema = z.discriminatedUnion("intent", [
       .string()
       .trim()
       .min(1, "Write a decline message so the learner knows why.")
-      .max(1000, "Please keep the decline message under 1000 characters."),
+      .max(
+        MAX_DECLINE_MESSAGE_LENGTH,
+        `Please keep the decline message under ${MAX_DECLINE_MESSAGE_LENGTH} characters.`
+      ),
   }),
 ]);
 
@@ -48,10 +52,9 @@ export async function action({ request }: Route.ActionArgs) {
   const parsed = parseFormData(formData, adminRefundActionSchema);
 
   if (!parsed.success) {
-    return data(
-      { error: Object.values(parsed.errors)[0] ?? "Invalid input." },
-      { status: 400 }
-    );
+    throw data(Object.values(parsed.errors)[0] ?? "Invalid input.", {
+      status: 400,
+    });
   }
 
   const { email } = declineRefundRequest({
@@ -87,8 +90,7 @@ function RefundRequestCard({ request }: { request: RefundRequest }) {
 
   useEffect(() => {
     if (fetcher.state === "idle" && fetcher.data) {
-      if ("success" in fetcher.data) toast.success(fetcher.data.message);
-      if ("error" in fetcher.data) toast.error(fetcher.data.error);
+      toast.success(fetcher.data.message);
     }
   }, [fetcher.state, fetcher.data]);
 
@@ -121,11 +123,11 @@ function RefundRequestCard({ request }: { request: RefundRequest }) {
           </div>
           <div>
             <dt className="text-muted-foreground">Watched now</dt>
-            <dd>{formatWatchTime(request.watchedSecondsNow)}</dd>
+            <dd>{formatWatchTime(request.currentWatchedSeconds)}</dd>
           </div>
         </dl>
 
-        {request.watchedTooMuchNow && (
+        {request.isOverWatchLimitNow && (
           <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
             <AlertTriangle className="size-4 shrink-0 text-amber-600" />
             <span>
@@ -150,12 +152,15 @@ function RefundRequestCard({ request }: { request: RefundRequest }) {
             className="text-sm font-medium"
           >
             Decline message
+            <span className="ml-2 font-normal text-muted-foreground">
+              Up to {MAX_DECLINE_MESSAGE_LENGTH} characters
+            </span>
           </label>
           <Textarea
             id={`decline-message-${request.id}`}
             name="declineMessage"
             required
-            maxLength={1000}
+            maxLength={MAX_DECLINE_MESSAGE_LENGTH}
             placeholder="Tell the learner why the request was declined. They will receive this by email."
           />
           <Button

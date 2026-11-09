@@ -2228,6 +2228,20 @@ This course is still in draft while the cluster examples are rewritten against t
   addWatchSession(students[3].id, course1LessonIds[0], 0, 480, 480, 8 * 24);
   addWatchSession(students[3].id, course1LessonIds[1], 0, 420, 600, 24);
 
+  // James (students[1]) bought Design Systems four days ago and watched one
+  // lesson for four minutes. No request raised — see "Recent solo purchases".
+  addWatchSession(students[1].id, course3LessonIds[0], 0, 240, 600, 3 * 24);
+
+  // Olivia (students[2]) bought Design Systems six days ago. She asked for a
+  // refund after two lessons (50 min), then kept watching, so her watch time
+  // now is over two hours and the review page shows the warning.
+  for (const [i, lessonId] of course3LessonIds.slice(0, 2).entries()) {
+    addWatchSession(students[2].id, lessonId, 0, 1500, 1800, 5 * 24 - i);
+  }
+  for (const [i, lessonId] of course3LessonIds.slice(2, 5).entries()) {
+    addWatchSession(students[2].id, lessonId, 0, 1500, 1800, 36 - i);
+  }
+
   // ─── Purchases ───
   // Individual purchases for enrolled students
 
@@ -2787,6 +2801,51 @@ This course is still in draft while the cluster examples are rewritten against t
       updatedAt: daysAgo(6),
     })
     .run();
+
+  // ─── Recent solo purchases on Design Systems ───
+  // Two more learners with a purchase inside the refund window, one of them
+  // with a request open.
+
+  // James: no request raised and almost nothing watched, so the course page
+  // offers him "Request a refund". Pick him to try the learner-side flow.
+  const james = studentByEmail("james.park@student.dev");
+  const olivia = studentByEmail("olivia.martinez@student.dev");
+
+  for (const [learner, daysOld] of [
+    [james, 4],
+    [olivia, 6],
+  ] as const) {
+    const purchase = db
+      .insert(schema.purchases)
+      .values({
+        userId: learner.id,
+        courseId: course3.id,
+        amountPaid: course3.price,
+        country: null,
+        createdAt: daysAgo(daysOld),
+      })
+      .returning()
+      .get();
+    db.insert(schema.enrollments)
+      .values({
+        userId: learner.id,
+        courseId: course3.id,
+        enrolledAt: daysAgo(daysOld),
+      })
+      .run();
+
+    // Olivia: an open request with 2+ hours watched since she raised it.
+    if (learner === olivia) {
+      db.insert(schema.refunds)
+        .values({
+          purchaseId: purchase.id,
+          status: RefundStatus.Requested,
+          reason: "I found a better course elsewhere and would like my money back.",
+          requestedAt: daysAgo(3),
+        })
+        .run();
+    }
+  }
 
   // ─── Flush watch events ───
   // Batched: the heartbeat makes these by far the largest table, and one
