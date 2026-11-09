@@ -5,21 +5,22 @@ import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
 import {
   courses,
-  coupons,
-  lessons,
-  modules,
   purchases,
   refunds,
   users,
-  videoWatchEvents,
   RefundStatus,
 } from "~/db/schema";
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
-import { getDiscountForCountry } from "~/lib/ppp";
+import {
+  REFUND_WINDOW_DAYS,
+  getRefundableAmount,
+  getWatchedSeconds,
+  hasClaimedSeat,
+  isWithinRefundWindow,
+} from "~/lib/refund-rules.server";
 import { formatPrice } from "~/lib/utils";
 
-const REFUND_WINDOW_DAYS = 14;
 const MAX_WATCHED_HOURS = 2;
 
 const refundParamsSchema = z.object({
@@ -47,17 +48,6 @@ function getLatestPurchase(userId: number, courseId: number) {
     .get();
 }
 
-function getLessonIdsForCourse(courseId: number): number[] {
-  const rows = db
-    .select({ id: lessons.id })
-    .from(lessons)
-    .innerJoin(modules, eq(lessons.moduleId, modules.id))
-    .where(eq(modules.courseId, courseId))
-    .all();
-
-  return rows.map((row) => row.id);
-}
-
 function getOpenRefund(purchaseId: number) {
   return db
     .select()
@@ -69,20 +59,6 @@ function getOpenRefund(purchaseId: number) {
       )
     )
     .get();
-}
-
-// The fourteen-day window is counted in whole days, not hours — someone who
-// buys at 23:00 should still get the whole of their fourteenth day.
-function calendarDay(when: Date): string {
-  const month = String(when.getMonth() + 1).padStart(2, "0");
-  const day = String(when.getDate()).padStart(2, "0");
-  return `${when.getFullYear()}-${month}-${day}`;
-}
-
-function lastDayOfWindow(purchasedAtIso: string): string {
-  const deadline = new Date(purchasedAtIso);
-  deadline.setDate(deadline.getDate() + REFUND_WINDOW_DAYS);
-  return calendarDay(deadline);
 }
 
 /**
@@ -149,50 +125,17 @@ export async function action({ params, request }: Route.ActionArgs) {
 
   // A seat that came out of a team licence, and has been claimed, belongs to
   // the team — the learner cannot hand it back on their own.
-  const claimedSeat = db
-    .select({ id: coupons.id })
-    .from(coupons)
-    .where(
-      and(eq(coupons.purchaseId, purchase.id), isNotNull(coupons.redeemedAt))
-    )
-    .get();
-
-  if (claimedSeat) {
+  if (hasClaimedSeat(purchase.id)) {
     throw data("A claimed team seat cannot be cancelled.", { status: 403 });
   }
 
-  const today = calendarDay(new Date());
-  const withinRefundWindow = today <= lastDayOfWindow(purchase.createdAt);
-
-  if (!withinRefundWindow) {
+  if (!isWithinRefundWindow(purchase.createdAt)) {
     throw data(`The ${REFUND_WINDOW_DAYS}-day window has closed.`, {
       status: 403,
     });
   }
 
-  const courseLessonIds = getLessonIdsForCourse(course.id);
-
-  let watchedSeconds = 0;
-  if (courseLessonIds.length > 0) {
-    const furthestPerLesson = db
-      .select({
-        furthest: sql<number>`max(${videoWatchEvents.positionSeconds})`,
-      })
-      .from(videoWatchEvents)
-      .where(
-        and(
-          eq(videoWatchEvents.userId, currentUserId),
-          inArray(videoWatchEvents.lessonId, courseLessonIds)
-        )
-      )
-      .groupBy(videoWatchEvents.lessonId)
-      .all();
-
-    watchedSeconds = furthestPerLesson.reduce(
-      (total, row) => total + row.furthest,
-      0
-    );
-  }
+  const watchedSeconds = getWatchedSeconds(currentUserId, course.id);
 
   if (watchedSeconds >= MAX_WATCHED_HOURS * 60 * 60) {
     throw data("You have watched too much of this course to cancel it.", {
@@ -200,10 +143,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     });
   }
 
-  // A purchase made at a purchasing-power price is given back at that price,
-  // not at the list price of the course.
-  const pppDiscount = getDiscountForCountry(purchase.country);
-  const refundableAmount = pppDiscount > 0 ? purchase.amountPaid : course.price;
+  const refundableAmount = getRefundableAmount(purchase, course);
 
   const formData = await request.formData();
   const parsed = parseFormData(formData, refundActionSchema);
