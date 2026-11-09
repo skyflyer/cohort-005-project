@@ -307,7 +307,10 @@ function findRating(userId: number, courseId: number) {
     .select()
     .from(courseRatings)
     .where(
-      and(eq(courseRatings.userId, userId), eq(courseRatings.courseId, courseId))
+      and(
+        eq(courseRatings.userId, userId),
+        eq(courseRatings.courseId, courseId)
+      )
     )
     .get();
 }
@@ -1014,7 +1017,7 @@ function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
           className="w-full text-muted-foreground"
           onClick={() => setIsFormOpen(true)}
         >
-          Cancel my purchase
+          Request a refund
         </Button>
       </div>
     );
@@ -1022,7 +1025,7 @@ function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
 
   return (
     <div className="border-t pt-4">
-      <p className="mb-2 text-sm font-medium">Cancel my purchase</p>
+      <p className="mb-2 text-sm font-medium">Request a refund</p>
       <p className="mb-3 text-xs text-muted-foreground">
         We will send {formatPrice(amount)} back to the card you paid with, once
         someone has read your note.
@@ -1040,7 +1043,7 @@ function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
         />
         <div className="flex gap-2">
           <Button type="submit" size="sm" disabled={isSubmitting}>
-            {isSubmitting ? "Sending..." : "Cancel my purchase"}
+            {isSubmitting ? "Sending..." : "Send refund request"}
           </Button>
           <Button
             type="button"
