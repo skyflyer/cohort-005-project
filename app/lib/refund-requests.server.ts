@@ -13,6 +13,8 @@ import {
   getWatchedSeconds,
   hasWatchedTooMuch,
 } from "~/lib/refund-rules.server";
+import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
+import { formatPrice } from "~/lib/utils";
 
 // Takes the database as a last argument (defaulting to the app database) so tests can pass an in-memory one.
 type Database = typeof db;
@@ -83,6 +85,34 @@ export function getOpenRefundRequests(database: Database = db) {
       isOverWatchLimitNow: hasWatchedTooMuch(currentWatchedSeconds),
     };
   });
+}
+
+/**
+ * The confirmation the learner gets in their inbox. There is no mail
+ * transport wired up yet, so the built message goes to the server log.
+ */
+export function buildRefundRequestEmail(input: {
+  learnerName: string;
+  learnerEmail: string;
+  courseTitle: string;
+  amount: number;
+}) {
+  return {
+    to: input.learnerEmail,
+    subject: `Refund request received — ${input.courseTitle}`,
+    body: [
+      `Hi ${input.learnerName},`,
+      "",
+      `We have your refund request for "${input.courseTitle}".`,
+      `The refund would be ${formatPrice(input.amount)}, the amount you paid.`,
+      "",
+      REFUND_PROGRESS_WARNING,
+      "",
+      "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again when it is done.",
+      "",
+      "— The Cadence team",
+    ].join("\n"),
+  };
 }
 
 /**

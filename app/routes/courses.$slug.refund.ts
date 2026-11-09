@@ -22,8 +22,7 @@ import {
   hasWatchedTooMuch,
   isWithinRefundWindow,
 } from "~/lib/refund-rules.server";
-import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
-import { formatPrice } from "~/lib/utils";
+import { buildRefundRequestEmail } from "~/lib/refund-requests.server";
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
@@ -48,34 +47,6 @@ function getLatestPurchase(userId: number, courseId: number) {
     .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
     .orderBy(sql`${purchases.createdAt} desc`)
     .get();
-}
-
-/**
- * The confirmation the learner gets in their inbox. There is no mail
- * transport wired up yet, so the built message goes to the server log.
- */
-function buildRefundRequestEmail(input: {
-  learnerName: string;
-  learnerEmail: string;
-  courseTitle: string;
-  amount: number;
-}) {
-  return {
-    to: input.learnerEmail,
-    subject: `Refund request received — ${input.courseTitle}`,
-    body: [
-      `Hi ${input.learnerName},`,
-      "",
-      `We have your refund request for "${input.courseTitle}".`,
-      `The refund would be ${formatPrice(input.amount)}, the amount you paid.`,
-      "",
-      REFUND_PROGRESS_WARNING,
-      "",
-      "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again when it is done.",
-      "",
-      "— The Cadence team",
-    ].join("\n"),
-  };
 }
 
 export async function action({ params, request }: Route.ActionArgs) {

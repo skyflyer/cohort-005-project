@@ -2,7 +2,10 @@ import { describe, it, expect } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
+import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
+import { formatPrice } from "~/lib/utils";
 import {
+  buildRefundRequestEmail,
   declineRefundRequest,
   getOpenRefundRequests,
 } from "./refund-requests.server";
@@ -236,5 +239,27 @@ describe("declineRefundRequest when the request is resolved meanwhile", () => {
     ).toThrow();
     const after = testDb.select().from(schema.refunds).get();
     expect(after?.declineMessage).toBe("First.");
+  });
+});
+
+describe("buildRefundRequestEmail", () => {
+  const email = buildRefundRequestEmail({
+    learnerName: "Sam",
+    learnerEmail: "sam@example.com",
+    courseTitle: "Design Systems",
+    amount: 4900,
+  });
+
+  it("is addressed to the learner", () => {
+    expect(email.to).toBe("sam@example.com");
+  });
+
+  it("warns that approval removes access and deletes progress", () => {
+    expect(email.body).toContain(REFUND_PROGRESS_WARNING);
+    expect(email.body).toContain("lose access");
+  });
+
+  it("states the refundable amount", () => {
+    expect(email.body).toContain(formatPrice(4900));
   });
 });

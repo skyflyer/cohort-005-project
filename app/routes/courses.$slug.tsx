@@ -15,13 +15,9 @@ import {
   lessonProgress,
   courseRatings,
   purchases,
-  coupons,
-  refunds,
-  videoWatchEvents,
   LessonProgressStatus,
-  RefundStatus,
 } from "~/db/schema";
-import { eq, and, or, sql, inArray, isNotNull } from "drizzle-orm";
+import { eq, and, or, sql, inArray } from "drizzle-orm";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -47,14 +43,21 @@ import { UserAvatar } from "~/components/user-avatar";
 import { Textarea } from "~/components/ui/textarea";
 import { data, isRouteErrorResponse } from "react-router";
 import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
-import { hasApprovedRefundForCourse } from "~/lib/refund-rules.server";
+import {
+  getRefundableAmount,
+  getWatchedSeconds,
+  hasApprovedRefundForCourse,
+  hasClaimedSeat,
+  hasOpenRefundRequest,
+  hasWatchedTooMuch,
+  isWithinRefundWindow,
+} from "~/lib/refund-rules.server";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
 import {
   calculatePppPrice,
   getCountryTierInfo,
-  getDiscountForCountry,
 } from "~/lib/ppp";
 import { parseFormData } from "~/lib/validation";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
@@ -372,9 +375,9 @@ function rateCourse(userId: number, courseId: number, rating: number) {
     .get();
 }
 
-const CANCEL_WINDOW_DAYS = 14;
-const CANCEL_WATCH_LIMIT_SECONDS = 2 * 60 * 60;
-const CANCEL_COMPLETION_LIMIT = 0.5;
+// A learner who has completed this share of a course's lessons is not offered
+// a refund request on this page. The refund route does not enforce this limit.
+const REFUND_REQUEST_COMPLETION_LIMIT = 0.5;
 
 function getPurchaseForCourse(userId: number, courseId: number) {
   return db
@@ -382,19 +385,6 @@ function getPurchaseForCourse(userId: number, courseId: number) {
     .from(purchases)
     .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
     .orderBy(sql`${purchases.createdAt} desc`)
-    .get();
-}
-
-function getRequestedRefund(purchaseId: number) {
-  return db
-    .select({ id: refunds.id })
-    .from(refunds)
-    .where(
-      and(
-        eq(refunds.purchaseId, purchaseId),
-        eq(refunds.status, RefundStatus.Requested)
-      )
-    )
     .get();
 }
 
@@ -416,88 +406,34 @@ function getCompletedLessonCount(userId: number, lessonIds: number[]) {
   return result?.count ?? 0;
 }
 
-function getSecondsWatched(userId: number, lessonIds: number[]) {
-  if (lessonIds.length === 0) return 0;
-
-  const furthestPerLesson = db
-    .select({
-      furthest: sql<number>`max(${videoWatchEvents.positionSeconds})`,
-    })
-    .from(videoWatchEvents)
-    .where(
-      and(
-        eq(videoWatchEvents.userId, userId),
-        inArray(videoWatchEvents.lessonId, lessonIds)
-      )
-    )
-    .groupBy(videoWatchEvents.lessonId)
-    .all();
-
-  return furthestPerLesson.reduce((total, row) => total + row.furthest, 0);
-}
-
-// Compare whole days, not hours — a purchase at 23:00 should still get its
-// full fourteenth day.
-function asDayString(when: Date) {
-  const year = when.getFullYear();
-  const month = String(when.getMonth() + 1).padStart(2, "0");
-  const day = String(when.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 /**
- * What the learner is offered if they want their money back, or null if this
- * purchase cannot be refunded.
+ * What the learner is offered if they want their money back, or null if they
+ * cannot request a refund for this purchase.
  */
-function getCancellationOffer(
+function getRefundRequestOffer(
   userId: number,
   course: { id: number; price: number }
 ) {
   const purchase = getPurchaseForCourse(userId, course.id);
 
   if (!purchase) return null;
-  if (getRequestedRefund(purchase.id)) return null;
+  if (hasOpenRefundRequest(purchase.id)) return null;
   if (hasApprovedRefundForCourse(userId, course.id)) return null;
-
-  const purchasedDay = asDayString(new Date(purchase.createdAt));
-  const windowEnd = new Date(purchase.createdAt);
-  windowEnd.setDate(windowEnd.getDate() + CANCEL_WINDOW_DAYS);
-  const lastDayInWindow = asDayString(windowEnd);
-  const todayDay = asDayString(new Date());
-  const isWithinWindow =
-    todayDay >= purchasedDay && todayDay <= lastDayInWindow;
-
-  if (!isWithinWindow) return null;
+  if (!isWithinRefundWindow(purchase.createdAt)) return null;
 
   const lessonIds = getCourseLessonIds(course.id);
 
   if (lessonIds.length > 0) {
     const completedCount = getCompletedLessonCount(userId, lessonIds);
-    if (completedCount / lessonIds.length >= CANCEL_COMPLETION_LIMIT) {
+    if (completedCount / lessonIds.length >= REFUND_REQUEST_COMPLETION_LIMIT) {
       return null;
     }
   }
 
-  if (getSecondsWatched(userId, lessonIds) >= CANCEL_WATCH_LIMIT_SECONDS) {
-    return null;
-  }
+  if (hasWatchedTooMuch(getWatchedSeconds(userId, course.id))) return null;
+  if (hasClaimedSeat(purchase.id)) return null;
 
-  const claimedSeat = db
-    .select({ id: coupons.id })
-    .from(coupons)
-    .where(
-      and(eq(coupons.purchaseId, purchase.id), isNotNull(coupons.redeemedAt))
-    )
-    .get();
-
-  if (claimedSeat) return null;
-
-  // A purchasing-power price is given back at the price that was paid, not at
-  // the list price of the course.
-  const pppDiscount = getDiscountForCountry(purchase.country);
-  const amount = pppDiscount > 0 ? purchase.amountPaid : course.price;
-
-  return { amount, lastDayInWindow };
+  return { amount: getRefundableAmount(purchase, course) };
 }
 
 const ratingSchema = z.object({
@@ -532,13 +468,13 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
-  let cancellation: { amount: number; lastDayInWindow: string } | null = null;
+  let refundRequestOffer: { amount: number } | null = null;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
 
     if (enrolled) {
-      cancellation = getCancellationOffer(currentUserId, {
+      refundRequestOffer = getRefundRequestOffer(currentUserId, {
         id: course.id,
         price: courseWithDetails.price,
       });
@@ -585,7 +521,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     tierInfo,
     ratingSummary,
     userRating,
-    cancellation,
+    refundRequestOffer,
   };
 }
 
@@ -686,7 +622,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     tierInfo,
     ratingSummary,
     userRating,
-    cancellation,
+    refundRequestOffer,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -922,10 +858,10 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                     </Button>
                   </Link>
                   <RateCourse userRating={userRating} />
-                  {cancellation && (
-                    <CancelPurchase
+                  {refundRequestOffer && (
+                    <RefundRequestForm
                       slug={course.slug}
-                      amount={cancellation.amount}
+                      amount={refundRequestOffer.amount}
                     />
                   )}
                 </>
@@ -999,7 +935,7 @@ function RateCourse({ userRating }: { userRating: number | null }) {
   );
 }
 
-function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
+function RefundRequestForm({ slug, amount }: { slug: string; amount: number }) {
   const fetcher = useFetcher<{ errors?: Record<string, string> }>();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const isSubmitting = fetcher.state !== "idle";
