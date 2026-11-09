@@ -51,19 +51,27 @@ export function isWithinRefundWindow(
   return calendarDay(now) <= lastDayOfWindow(purchasedAtIso);
 }
 
-/** Sum of the furthest position the learner reached in each lesson of the course. */
-export function getWatchedSeconds(
-  userId: number,
+/** The ids of every lesson in a course. */
+export function getCourseLessonIds(
   courseId: number,
   database: Database = db
-): number {
-  const lessonIds = database
+): number[] {
+  return database
     .select({ id: lessons.id })
     .from(lessons)
     .innerJoin(modules, eq(lessons.moduleId, modules.id))
     .where(eq(modules.courseId, courseId))
     .all()
     .map((row) => row.id);
+}
+
+/** Sum of the furthest position the learner reached in each lesson of the course. */
+export function getWatchedSeconds(
+  userId: number,
+  courseId: number,
+  database: Database = db
+): number {
+  const lessonIds = getCourseLessonIds(courseId, database);
 
   if (lessonIds.length === 0) return 0;
 

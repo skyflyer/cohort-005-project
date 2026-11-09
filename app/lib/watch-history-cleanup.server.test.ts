@@ -50,13 +50,17 @@ function setup() {
   const lesson = addLesson(course.id, "Lesson");
   const otherLesson = addLesson(otherCourse.id, "Other lesson");
 
-  const watch = (userId: number, lessonId: number) =>
+  const watch = (
+    userId: number,
+    lessonId: number,
+    createdAt = "2025-02-01T10:00:00.000Z"
+  ) =>
     testDb
       .insert(schema.videoWatchEvents)
-      .values({ userId, lessonId, eventType: "play", positionSeconds: 30 })
+      .values({ userId, lessonId, eventType: "play", positionSeconds: 30, createdAt })
       .run();
 
-  const refundCourse = (
+  const seedApprovedRefund = (
     userId: number,
     courseId: number,
     status: schema.RefundStatus,
@@ -73,7 +77,7 @@ function setup() {
       .run();
   };
 
-  const remaining = () =>
+  const remainingWatchEvents = () =>
     testDb
       .select()
       .from(schema.videoWatchEvents)
@@ -81,21 +85,21 @@ function setup() {
       .map((e) => `${e.userId}:${e.lessonId}`)
       .sort();
 
-  return { testDb, user, course, lesson, otherLesson, watch, refundCourse, remaining };
+  return { testDb, user, course, lesson, otherLesson, watch, seedApprovedRefund, remainingWatchEvents };
 }
 
 describe("deleteExpiredWatchHistory", () => {
   it("deletes the refunded learner's watch history on the refunded course after 18 months", () => {
-    const { testDb, user, course, lesson, watch, refundCourse, remaining } = setup();
+    const { testDb, user, course, lesson, watch, seedApprovedRefund, remainingWatchEvents } = setup();
     watch(user.id, lesson.id);
-    refundCourse(user.id, course.id, schema.RefundStatus.Approved, OLD);
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Approved, OLD);
 
     expect(deleteExpiredWatchHistory(NOW, testDb)).toBe(1);
-    expect(remaining()).toEqual([]);
+    expect(remainingWatchEvents()).toEqual([]);
   });
 
   it("keeps watch history on the learner's other courses and other learners' history", () => {
-    const { testDb, user, course, lesson, otherLesson, watch, refundCourse, remaining } =
+    const { testDb, user, course, lesson, otherLesson, watch, seedApprovedRefund, remainingWatchEvents } =
       setup();
     const other = testDb
       .insert(schema.users)
@@ -105,49 +109,76 @@ describe("deleteExpiredWatchHistory", () => {
     watch(user.id, lesson.id);
     watch(user.id, otherLesson.id);
     watch(other.id, lesson.id);
-    refundCourse(user.id, course.id, schema.RefundStatus.Approved, OLD);
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Approved, OLD);
 
     expect(deleteExpiredWatchHistory(NOW, testDb)).toBe(1);
-    expect(remaining()).toEqual([
+    expect(remainingWatchEvents()).toEqual([
       `${user.id}:${otherLesson.id}`,
       `${other.id}:${lesson.id}`,
     ]);
   });
 
   it("keeps watch history when the refund was approved less than 18 months ago", () => {
-    const { testDb, user, course, lesson, watch, refundCourse, remaining } = setup();
+    const { testDb, user, course, lesson, watch, seedApprovedRefund, remainingWatchEvents } = setup();
     watch(user.id, lesson.id);
-    refundCourse(user.id, course.id, schema.RefundStatus.Approved, RECENT);
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Approved, RECENT);
 
     expect(deleteExpiredWatchHistory(NOW, testDb)).toBe(0);
-    expect(remaining()).toEqual([`${user.id}:${lesson.id}`]);
+    expect(remainingWatchEvents()).toEqual([`${user.id}:${lesson.id}`]);
   });
 
   it("keeps watch history for requested and declined refunds", () => {
-    const { testDb, user, course, lesson, watch, refundCourse, remaining } = setup();
+    const { testDb, user, course, lesson, watch, seedApprovedRefund, remainingWatchEvents } = setup();
     watch(user.id, lesson.id);
-    refundCourse(user.id, course.id, schema.RefundStatus.Requested, null);
-    refundCourse(user.id, course.id, schema.RefundStatus.Declined, OLD);
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Requested, null);
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Declined, OLD);
 
     expect(deleteExpiredWatchHistory(NOW, testDb)).toBe(0);
-    expect(remaining()).toEqual([`${user.id}:${lesson.id}`]);
+    expect(remainingWatchEvents()).toEqual([`${user.id}:${lesson.id}`]);
   });
 
   it("keeps watch history for an approved refund with no approval time", () => {
-    const { testDb, user, course, lesson, watch, refundCourse, remaining } = setup();
+    const { testDb, user, course, lesson, watch, seedApprovedRefund, remainingWatchEvents } = setup();
     watch(user.id, lesson.id);
-    refundCourse(user.id, course.id, schema.RefundStatus.Approved, null);
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Approved, null);
 
     expect(deleteExpiredWatchHistory(NOW, testDb)).toBe(0);
-    expect(remaining()).toEqual([`${user.id}:${lesson.id}`]);
+    expect(remainingWatchEvents()).toEqual([`${user.id}:${lesson.id}`]);
   });
 
   it("is safe to run repeatedly", () => {
-    const { testDb, user, course, lesson, watch, refundCourse } = setup();
+    const { testDb, user, course, lesson, watch, seedApprovedRefund } = setup();
     watch(user.id, lesson.id);
-    refundCourse(user.id, course.id, schema.RefundStatus.Approved, OLD);
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Approved, OLD);
 
     expect(deleteExpiredWatchHistory(NOW, testDb)).toBe(1);
     expect(deleteExpiredWatchHistory(NOW, testDb)).toBe(0);
+  });
+
+  it("deletes only the history up to the refund, keeping what a later purchase produced", () => {
+    const { testDb, user, course, lesson, watch, seedApprovedRefund, remainingWatchEvents } =
+      setup();
+    watch(user.id, lesson.id, "2025-02-01T10:00:00.000Z");
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Approved, OLD);
+    // Bought again after the refund and watched.
+    watch(user.id, lesson.id, "2025-06-01T10:00:00.000Z");
+
+    expect(deleteExpiredWatchHistory(NOW, testDb)).toBe(1);
+    expect(remainingWatchEvents()).toEqual([`${user.id}:${lesson.id}`]);
+    const [kept] = testDb.select().from(schema.videoWatchEvents).all();
+    expect(kept.createdAt).toBe("2025-06-01T10:00:00.000Z");
+  });
+
+  it("counts 18 months back to the last day of a shorter month", () => {
+    const { testDb, user, course, lesson, watch, seedApprovedRefund, remainingWatchEvents } =
+      setup();
+    watch(user.id, lesson.id, "2025-02-01T10:00:00.000Z");
+    // 31 Aug 2026 minus 18 months is 28 Feb 2025, not 3 Mar 2025.
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Approved, "2025-03-01T00:00:00.000Z");
+    expect(deleteExpiredWatchHistory(new Date("2026-08-31T12:00:00.000Z"), testDb)).toBe(0);
+    expect(remainingWatchEvents()).toHaveLength(1);
+
+    seedApprovedRefund(user.id, course.id, schema.RefundStatus.Approved, "2025-02-27T00:00:00.000Z");
+    expect(deleteExpiredWatchHistory(new Date("2026-08-31T12:00:00.000Z"), testDb)).toBe(1);
   });
 });
