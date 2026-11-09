@@ -46,6 +46,8 @@ import { CourseImage } from "~/components/course-image";
 import { UserAvatar } from "~/components/user-avatar";
 import { Textarea } from "~/components/ui/textarea";
 import { data, isRouteErrorResponse } from "react-router";
+import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
+import { hasApprovedRefundForCourse } from "~/lib/refund-rules.server";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
@@ -445,7 +447,7 @@ function asDayString(when: Date) {
 
 /**
  * What the learner is offered if they want their money back, or null if this
- * purchase cannot be cancelled.
+ * purchase cannot be refunded.
  */
 function getCancellationOffer(
   userId: number,
@@ -455,6 +457,7 @@ function getCancellationOffer(
 
   if (!purchase) return null;
   if (getRequestedRefund(purchase.id)) return null;
+  if (hasApprovedRefundForCourse(userId, course.id)) return null;
 
   const purchasedDay = asDayString(new Date(purchase.createdAt));
   const windowEnd = new Date(purchase.createdAt);
@@ -1029,6 +1032,9 @@ function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
       <p className="mb-3 text-xs text-muted-foreground">
         We will send {formatPrice(amount)} back to the card you paid with, once
         someone has read your note.
+      </p>
+      <p className="mb-3 text-xs font-medium text-destructive">
+        {REFUND_PROGRESS_WARNING}
       </p>
       <fetcher.Form
         method="post"

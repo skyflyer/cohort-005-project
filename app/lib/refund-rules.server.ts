@@ -8,7 +8,7 @@ import {
   modules,
   videoWatchEvents,
   type courses,
-  type purchases,
+  purchases,
 } from "~/db/schema";
 import { getDiscountForCountry } from "~/lib/ppp";
 
@@ -134,4 +134,28 @@ export function hasOpenRefundRequest(
     )
     .get();
   return open !== undefined;
+}
+
+/**
+ * Whether any purchase of the course by the learner was refunded. A learner
+ * gets one refund per course, even if they bought it again afterwards.
+ */
+export function hasApprovedRefundForCourse(
+  userId: number,
+  courseId: number,
+  database: Database = db
+): boolean {
+  const approved = database
+    .select({ id: refunds.id })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .where(
+      and(
+        eq(purchases.userId, userId),
+        eq(purchases.courseId, courseId),
+        eq(refunds.status, RefundStatus.Approved)
+      )
+    )
+    .get();
+  return approved !== undefined;
 }

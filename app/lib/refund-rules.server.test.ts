@@ -7,6 +7,7 @@ import {
   isWithinRefundWindow,
   getWatchedSeconds,
   hasClaimedSeat,
+  hasApprovedRefundForCourse,
   hasOpenRefundRequest,
   hasWatchedTooMuch,
 } from "./refund-rules.server";
@@ -276,5 +277,63 @@ describe("hasOpenRefundRequest", () => {
     const { testDb, purchase, request } = setup();
     request(schema.RefundStatus.Declined);
     expect(hasOpenRefundRequest(purchase.id, testDb)).toBe(false);
+  });
+});
+
+describe("hasApprovedRefundForCourse", () => {
+  function setup() {
+    const testDb = createTestDb();
+    const { user, course } = seedBaseData(testDb);
+    const buy = () =>
+      testDb
+        .insert(schema.purchases)
+        .values({ userId: user.id, courseId: course.id, amountPaid: 1000 })
+        .returning()
+        .get();
+    const refund = (purchaseId: number, status: schema.RefundStatus) =>
+      testDb
+        .insert(schema.refunds)
+        .values({ purchaseId, status, reason: "Not for me." })
+        .run();
+    return { testDb, user, course, buy, refund };
+  }
+
+  it("is false when the learner never had a refund", () => {
+    const { testDb, user, course, buy } = setup();
+    buy();
+    expect(hasApprovedRefundForCourse(user.id, course.id, testDb)).toBe(false);
+  });
+
+  it("is true when a purchase of the course was refunded", () => {
+    const { testDb, user, course, buy, refund } = setup();
+    refund(buy().id, schema.RefundStatus.Approved);
+    expect(hasApprovedRefundForCourse(user.id, course.id, testDb)).toBe(true);
+  });
+
+  it("is still true after the learner bought the course again", () => {
+    const { testDb, user, course, buy, refund } = setup();
+    refund(buy().id, schema.RefundStatus.Approved);
+    buy();
+    expect(hasApprovedRefundForCourse(user.id, course.id, testDb)).toBe(true);
+  });
+
+  it("is false when the earlier request was declined", () => {
+    const { testDb, user, course, buy, refund } = setup();
+    refund(buy().id, schema.RefundStatus.Declined);
+    expect(hasApprovedRefundForCourse(user.id, course.id, testDb)).toBe(false);
+  });
+
+  it("is false when the request is still open", () => {
+    const { testDb, user, course, buy, refund } = setup();
+    refund(buy().id, schema.RefundStatus.Requested);
+    expect(hasApprovedRefundForCourse(user.id, course.id, testDb)).toBe(false);
+  });
+
+  it("is false for a refund of a different course", () => {
+    const { testDb, user, course, buy, refund } = setup();
+    refund(buy().id, schema.RefundStatus.Approved);
+    expect(hasApprovedRefundForCourse(user.id, course.id + 1, testDb)).toBe(
+      false
+    );
   });
 });

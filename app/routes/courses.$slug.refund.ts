@@ -16,11 +16,13 @@ import {
   REFUND_WINDOW_DAYS,
   getRefundableAmount,
   getWatchedSeconds,
+  hasApprovedRefundForCourse,
   hasClaimedSeat,
   hasOpenRefundRequest,
   hasWatchedTooMuch,
   isWithinRefundWindow,
 } from "~/lib/refund-rules.server";
+import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
 import { formatPrice } from "~/lib/utils";
 
 const refundParamsSchema = z.object({
@@ -31,7 +33,7 @@ const refundActionSchema = z.object({
   reason: z
     .string()
     .trim()
-    .min(10, "Tell us a little more about why you want to cancel.")
+    .min(10, "Tell us a little more about why you want a refund.")
     .max(1000, "Please keep your reason under 1000 characters."),
 });
 
@@ -67,6 +69,8 @@ function buildRefundRequestEmail(input: {
       `We have your refund request for "${input.courseTitle}".`,
       `The refund would be ${formatPrice(input.amount)}, the amount you paid.`,
       "",
+      REFUND_PROGRESS_WARNING,
+      "",
       "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again when it is done.",
       "",
       "— The Cadence team",
@@ -78,7 +82,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
-    throw data("You must be logged in to cancel a purchase.", { status: 401 });
+    throw data("You must be logged in to request a refund.", { status: 401 });
   }
 
   const { slug } = parseParams(params, refundParamsSchema);
@@ -104,6 +108,13 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("You have not bought this course.", { status: 403 });
   }
 
+  if (hasApprovedRefundForCourse(currentUserId, course.id)) {
+    throw data(
+      "You have already had a refund for this course, so we cannot accept another refund request for it.",
+      { status: 409 }
+    );
+  }
+
   if (hasOpenRefundRequest(purchase.id)) {
     throw data("You already have a request open on this purchase.", {
       status: 409,
@@ -113,7 +124,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   // A seat that came out of a team licence, and has been claimed, belongs to
   // the team — the learner cannot hand it back on their own.
   if (hasClaimedSeat(purchase.id)) {
-    throw data("A claimed team seat cannot be cancelled.", { status: 403 });
+    throw data("A claimed team seat cannot be refunded.", { status: 403 });
   }
 
   if (!isWithinRefundWindow(purchase.createdAt)) {
@@ -125,7 +136,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   const watchedSeconds = getWatchedSeconds(currentUserId, course.id);
 
   if (hasWatchedTooMuch(watchedSeconds)) {
-    throw data("You have watched too much of this course to cancel it.", {
+    throw data("You have watched too much of this course to request a refund.", {
       status: 403,
     });
   }
