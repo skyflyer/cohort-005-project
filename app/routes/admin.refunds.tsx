@@ -181,12 +181,21 @@ function RefundRequestCard({ request }: { request: RefundRequest }) {
             <p className="text-sm">
               Approve the refund of {formatPrice(request.refundableAmount)} to{" "}
               <strong>{request.learnerName}</strong> for{" "}
-              <strong>{request.courseTitle}</strong>? This deletes their
-              progress in {request.lessonsWithProgress}{" "}
-              {request.lessonsWithProgress === 1 ? "lesson" : "lessons"}, plus
-              their quiz attempts and rating for this course, and removes their
-              access. Unused team seat codes stop working. This cannot be
-              undone.
+              <strong>{request.courseTitle}</strong>?{" "}
+              {request.isTeamPurchase ? (
+                <>
+                  This is a team purchase: its unused seat codes stop working,
+                  and the buyer&apos;s own access and progress stay as they are.
+                </>
+              ) : (
+                <>
+                  This deletes their progress in {request.lessonsWithProgress}{" "}
+                  {request.lessonsWithProgress === 1 ? "lesson" : "lessons"},
+                  plus their quiz attempts and rating for this course, and
+                  removes their access.
+                </>
+              )}{" "}
+              This cannot be undone.
             </p>
             <div className="flex gap-2">
               <Button

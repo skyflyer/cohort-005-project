@@ -3,10 +3,14 @@ import { eq, sql } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { getSeatCodeStatus } from "./seat-codes.server";
-import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
+import {
+  REFUND_PROGRESS_WARNING,
+  REFUND_TEAM_PURCHASE_NOTICE,
+} from "~/lib/refund-limits";
 import { formatPrice } from "~/lib/utils";
 import {
   approveRefundRequest,
+  buildRefundApprovalEmail,
   buildRefundRequestEmail,
   declineRefundRequest,
   getOpenRefundRequests,
@@ -264,6 +268,7 @@ describe("buildRefundRequestEmail", () => {
     learnerEmail: "sam@example.com",
     courseTitle: "Design Systems",
     amount: 4900,
+    isTeamPurchase: false,
   });
 
   it("is addressed to the learner", () => {
@@ -576,6 +581,128 @@ describe("approveRefundRequest", () => {
     expect(email.subject).toContain(course.title);
     expect(email.body).toContain(formatPrice(10000));
     expect(email.body).toMatch(/progress/i);
+  });
+});
+
+describe("buildRefundRequestEmail for a team purchase", () => {
+  const email = buildRefundRequestEmail({
+    learnerName: "Sam",
+    learnerEmail: "sam@example.com",
+    courseTitle: "Design Systems",
+    amount: 45000,
+    isTeamPurchase: true,
+  });
+
+  it("does not warn about progress deletion", () => {
+    expect(email.body).not.toContain(REFUND_PROGRESS_WARNING);
+    expect(email.body).not.toContain("progress");
+  });
+
+  it("explains that unused seat codes stop working", () => {
+    expect(email.body).toContain(REFUND_TEAM_PURCHASE_NOTICE);
+    expect(email.body).toContain(formatPrice(45000));
+  });
+});
+
+describe("buildRefundApprovalEmail", () => {
+  const input = {
+    learnerName: "Sam",
+    learnerEmail: "sam@example.com",
+    courseTitle: "Design Systems",
+    amount: 4900,
+  };
+
+  it("says access ended and progress was deleted for a solo purchase", () => {
+    const email = buildRefundApprovalEmail({ ...input, isTeamPurchase: false });
+    expect(email.body).toContain("progress for it has been deleted");
+  });
+
+  it("does not mention progress for a team purchase", () => {
+    const email = buildRefundApprovalEmail({ ...input, isTeamPurchase: true });
+    expect(email.body).not.toContain("progress");
+    expect(email.body).not.toContain("access to the course has ended");
+    expect(email.body).toContain("seat codes");
+  });
+});
+
+describe("approveRefundRequest for a team purchase", () => {
+  function setupTeam() {
+    const base = setupApproval();
+    base.testDb
+      .update(schema.purchases)
+      .set({ amountPaid: 45000 })
+      .where(eq(schema.purchases.id, base.purchase.id))
+      .run();
+    base.seat("UNUSED-1");
+    base.seat("UNUSED-2");
+    return base;
+  }
+
+  it("leaves the buyer's enrollment, progress, quiz data and rating alone", () => {
+    const { testDb, admin, request } = setupTeam();
+    const refund = request();
+
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    expect(testDb.select().from(schema.enrollments).all()).toHaveLength(2);
+    expect(testDb.select().from(schema.lessonProgress).all()).toHaveLength(2);
+    expect(testDb.select().from(schema.quizAttempts).all()).toHaveLength(2);
+    expect(testDb.select().from(schema.quizAnswers).all()).toHaveLength(2);
+    expect(testDb.select().from(schema.courseRatings).all()).toHaveLength(2);
+  });
+
+  it("voids the unredeemed seat codes and records the refund at what was paid", () => {
+    const { testDb, admin, request } = setupTeam();
+    const refund = request();
+
+    approveRefundRequest({ refundId: refund.id, adminId: admin.id }, testDb);
+
+    for (const code of testDb.select().from(schema.coupons).all()) {
+      expect(getSeatCodeStatus(code)).toMatchObject({ reason: "voided" });
+    }
+    expect(testDb.select().from(schema.refunds).get()).toMatchObject({
+      status: schema.RefundStatus.Approved,
+      amountRefunded: 45000,
+    });
+  });
+
+  it("returns an email that does not mention progress", () => {
+    const { testDb, admin, request } = setupTeam();
+    const refund = request();
+
+    const { email } = approveRefundRequest(
+      { refundId: refund.id, adminId: admin.id },
+      testDb
+    );
+
+    expect(email.body).not.toContain("progress");
+    expect(email.body).toContain(formatPrice(45000));
+  });
+});
+
+describe("getOpenRefundRequests for a team purchase", () => {
+  it("shows what was paid, flags it as a team purchase and counts no progress to delete", () => {
+    const { testDb, purchase, seat, request } = setupApproval();
+    testDb
+      .update(schema.purchases)
+      .set({ amountPaid: 45000 })
+      .where(eq(schema.purchases.id, purchase.id))
+      .run();
+    seat("UNUSED-1");
+    request();
+
+    expect(getOpenRefundRequests(testDb)[0]).toMatchObject({
+      isTeamPurchase: true,
+      refundableAmount: 45000,
+      lessonsWithProgress: 0,
+    });
+  });
+
+  it("flags a solo purchase as not a team purchase", () => {
+    const { testDb, request } = setupApproval();
+    request();
+
+    expect(getOpenRefundRequests(testDb)[0].isTeamPurchase).toBe(false);
   });
 });
 

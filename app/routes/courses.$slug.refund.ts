@@ -13,12 +13,15 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
 import {
+  REFUND_COMPLETION_LIMIT,
   REFUND_WINDOW_DAYS,
   getRefundableAmount,
   getWatchedSeconds,
   hasApprovedRefundForCourse,
   hasClaimedSeat,
+  hasCompletedTooMuch,
   hasOpenRefundRequest,
+  isTeamPurchase,
   hasWatchedTooMuch,
   isWithinRefundWindow,
 } from "~/lib/refund-rules.server";
@@ -112,7 +115,18 @@ export async function action({ params, request }: Route.ActionArgs) {
     });
   }
 
-  const refundableAmount = getRefundableAmount(purchase, course);
+  if (hasCompletedTooMuch(currentUserId, course.id)) {
+    throw data(
+      `You have completed ${REFUND_COMPLETION_LIMIT * 100}% or more of this course, so we cannot accept a refund request for it.`,
+      { status: 403 }
+    );
+  }
+
+  const isTeam = isTeamPurchase(purchase.id);
+  const refundableAmount = getRefundableAmount(
+    { ...purchase, isTeamPurchase: isTeam },
+    course
+  );
 
   const formData = await request.formData();
   const parsed = parseFormData(formData, refundActionSchema);
@@ -135,6 +149,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     learnerEmail: learner.email,
     courseTitle: course.title,
     amount: refundableAmount,
+    isTeamPurchase: isTeam,
   });
 
   console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);

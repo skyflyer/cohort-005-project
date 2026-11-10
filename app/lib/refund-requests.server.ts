@@ -12,6 +12,7 @@ import {
 import {
   getRefundableAmount,
   hasClaimedSeat,
+  isTeamPurchase,
   getWatchedSeconds,
   hasWatchedTooMuch,
 } from "~/lib/refund-rules.server";
@@ -20,7 +21,10 @@ import {
   deleteLearnerCourseData,
 } from "~/lib/learner-course-data.server";
 import type { Database, DatabaseReader } from "~/lib/database-types";
-import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
+import {
+  REFUND_PROGRESS_WARNING,
+  REFUND_TEAM_PURCHASE_NOTICE,
+} from "~/lib/refund-limits";
 import { formatPrice } from "~/lib/utils";
 
 // Both the review list and the decline action start from a refund joined to
@@ -62,6 +66,7 @@ export function getOpenRefundRequests(database: Database = db) {
     .all();
 
   return rows.map((row) => {
+    const isTeam = isTeamPurchase(row.purchaseId, database);
     const currentWatchedSeconds = getWatchedSeconds(
       row.learnerId,
       row.courseId,
@@ -75,9 +80,14 @@ export function getOpenRefundRequests(database: Database = db) {
       courseTitle: row.courseTitle,
       purchasedAt: row.purchasedAt,
       refundableAmount: getRefundableAmount(
-        { amountPaid: row.amountPaid, country: row.country },
+        {
+          amountPaid: row.amountPaid,
+          country: row.country,
+          isTeamPurchase: isTeam,
+        },
         { price: row.coursePrice }
       ),
+      isTeamPurchase: isTeam,
       reason: row.reason,
       requestedAt: row.requestedAt,
       watchedSecondsAtRequest: getWatchedSeconds(
@@ -88,11 +98,10 @@ export function getOpenRefundRequests(database: Database = db) {
       ),
       currentWatchedSeconds,
       isOverWatchLimitNow: hasWatchedTooMuch(currentWatchedSeconds),
-      lessonsWithProgress: countLessonsWithProgress(
-        row.learnerId,
-        row.courseId,
-        database
-      ),
+      // A team purchase never deletes the buyer's own progress.
+      lessonsWithProgress: isTeam
+        ? 0
+        : countLessonsWithProgress(row.learnerId, row.courseId, database),
       hasClaimedSeat: hasClaimedSeat(row.purchaseId, database),
     };
   });
@@ -107,6 +116,7 @@ export function buildRefundRequestEmail(input: {
   learnerEmail: string;
   courseTitle: string;
   amount: number;
+  isTeamPurchase: boolean;
 }) {
   return {
     to: input.learnerEmail,
@@ -117,7 +127,9 @@ export function buildRefundRequestEmail(input: {
       `We have your refund request for "${input.courseTitle}".`,
       `The refund would be ${formatPrice(input.amount)}, the amount you paid.`,
       "",
-      REFUND_PROGRESS_WARNING,
+      input.isTeamPurchase
+        ? REFUND_TEAM_PURCHASE_NOTICE
+        : REFUND_PROGRESS_WARNING,
       "",
       "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again when it is done.",
       "",
@@ -223,6 +235,7 @@ export function buildRefundApprovalEmail(input: {
   learnerEmail: string;
   courseTitle: string;
   amount: number;
+  isTeamPurchase: boolean;
 }) {
   return {
     to: input.learnerEmail,
@@ -233,7 +246,9 @@ export function buildRefundApprovalEmail(input: {
       `Your refund request for "${input.courseTitle}" has been approved.`,
       `We are refunding ${formatPrice(input.amount)} to your card.`,
       "",
-      "As we warned when you asked, your access to the course has ended and your progress for it has been deleted.",
+      input.isTeamPurchase
+        ? "The seat codes from this purchase that nobody had used yet no longer work. Your own access to the course has not changed."
+        : "As we warned when you asked, your access to the course has ended and your progress for it has been deleted.",
       "",
       "— The Cadence team",
     ].join("\n"),
@@ -242,9 +257,10 @@ export function buildRefundApprovalEmail(input: {
 
 /**
  * Approves an open refund request (ADR 0001). In one transaction: marks the
- * refund approved at the refundable amount, deletes the learner's enrollment,
- * lesson progress, quiz attempts and answers, and rating for the course,
- * and voids the purchase's unredeemed seat codes so they stop working.
+ * refund approved at the refundable amount, and for a solo purchase deletes
+ * the learner's enrollment, lesson progress, quiz attempts and answers, and
+ * rating for the course. A team purchase leaves the buyer's own data alone.
+ * It also voids the purchase's unredeemed seat codes so they stop working.
  * Watch history and comments are kept. Refused if a seat was claimed.
  * Returns the approval email for the caller to send.
  */
@@ -275,8 +291,13 @@ export function approveRefundRequest(
       );
     }
 
+    const isTeam = isTeamPurchase(found.purchaseId, tx);
     const amountRefunded = getRefundableAmount(
-      { amountPaid: found.amountPaid, country: found.country },
+      {
+        amountPaid: found.amountPaid,
+        country: found.country,
+        isTeamPurchase: isTeam,
+      },
       { price: found.coursePrice }
     );
 
@@ -304,7 +325,11 @@ export function approveRefundRequest(
       });
     }
 
-    deleteLearnerCourseData(tx, found.learnerId, found.courseId);
+    // A team purchase never gave the buyer an enrollment, so their own
+    // access and progress (perhaps from a separate solo purchase) stay.
+    if (!isTeam) {
+      deleteLearnerCourseData(tx, found.learnerId, found.courseId);
+    }
 
     // Void rather than delete: the rows record that this purchase minted
     // seats. No seat was claimed (checked above), so all of them are unredeemed.
@@ -315,7 +340,7 @@ export function approveRefundRequest(
       )
       .run();
 
-    return { ...found, amountRefunded };
+    return { ...found, amountRefunded, isTeam };
   });
 
   return {
@@ -324,6 +349,7 @@ export function approveRefundRequest(
       learnerEmail: refund.learnerEmail,
       courseTitle: refund.courseTitle,
       amount: refund.amountRefunded,
+      isTeamPurchase: refund.isTeam,
     }),
   };
 }

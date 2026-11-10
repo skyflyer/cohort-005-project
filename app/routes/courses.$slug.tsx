@@ -42,13 +42,18 @@ import { CourseImage } from "~/components/course-image";
 import { UserAvatar } from "~/components/user-avatar";
 import { Textarea } from "~/components/ui/textarea";
 import { data, isRouteErrorResponse } from "react-router";
-import { REFUND_PROGRESS_WARNING } from "~/lib/refund-limits";
+import {
+  REFUND_PROGRESS_WARNING,
+  REFUND_TEAM_PURCHASE_NOTICE,
+} from "~/lib/refund-limits";
 import {
   getRefundableAmount,
   getWatchedSeconds,
   hasApprovedRefundForCourse,
   hasClaimedSeat,
+  hasCompletedTooMuch,
   hasOpenRefundRequest,
+  isTeamPurchase,
   hasWatchedTooMuch,
   isWithinRefundWindow,
 } from "~/lib/refund-rules.server";
@@ -375,10 +380,6 @@ function rateCourse(userId: number, courseId: number, rating: number) {
     .get();
 }
 
-// A learner who has completed this share of a course's lessons is not offered
-// a refund request on this page. The refund route does not enforce this limit.
-const REFUND_REQUEST_COMPLETION_LIMIT = 0.5;
-
 function getPurchaseForCourse(userId: number, courseId: number) {
   return db
     .select()
@@ -386,24 +387,6 @@ function getPurchaseForCourse(userId: number, courseId: number) {
     .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
     .orderBy(sql`${purchases.createdAt} desc`)
     .get();
-}
-
-function getCompletedLessonCount(userId: number, lessonIds: number[]) {
-  if (lessonIds.length === 0) return 0;
-
-  const result = db
-    .select({ count: sql<number>`count(*)` })
-    .from(lessonProgress)
-    .where(
-      and(
-        eq(lessonProgress.userId, userId),
-        eq(lessonProgress.status, LessonProgressStatus.Completed),
-        inArray(lessonProgress.lessonId, lessonIds)
-      )
-    )
-    .get();
-
-  return result?.count ?? 0;
 }
 
 /**
@@ -421,19 +404,16 @@ function getRefundRequestOffer(
   if (hasApprovedRefundForCourse(userId, course.id)) return null;
   if (!isWithinRefundWindow(purchase.createdAt)) return null;
 
-  const lessonIds = getCourseLessonIds(course.id);
-
-  if (lessonIds.length > 0) {
-    const completedCount = getCompletedLessonCount(userId, lessonIds);
-    if (completedCount / lessonIds.length >= REFUND_REQUEST_COMPLETION_LIMIT) {
-      return null;
-    }
-  }
-
+  if (hasCompletedTooMuch(userId, course.id)) return null;
   if (hasWatchedTooMuch(getWatchedSeconds(userId, course.id))) return null;
   if (hasClaimedSeat(purchase.id)) return null;
 
-  return { amount: getRefundableAmount(purchase, course) };
+  const isTeam = isTeamPurchase(purchase.id);
+
+  return {
+    amount: getRefundableAmount({ ...purchase, isTeamPurchase: isTeam }, course),
+    isTeamPurchase: isTeam,
+  };
 }
 
 const ratingSchema = z.object({
@@ -468,7 +448,10 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
-  let refundRequestOffer: { amount: number } | null = null;
+  let refundRequestOffer: {
+    amount: number;
+    isTeamPurchase: boolean;
+  } | null = null;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
@@ -862,6 +845,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                     <RefundRequestForm
                       slug={course.slug}
                       amount={refundRequestOffer.amount}
+                      isTeamPurchase={refundRequestOffer.isTeamPurchase}
                     />
                   )}
                 </>
@@ -935,7 +919,15 @@ function RateCourse({ userRating }: { userRating: number | null }) {
   );
 }
 
-function RefundRequestForm({ slug, amount }: { slug: string; amount: number }) {
+function RefundRequestForm({
+  slug,
+  amount,
+  isTeamPurchase,
+}: {
+  slug: string;
+  amount: number;
+  isTeamPurchase: boolean;
+}) {
   const fetcher = useFetcher<{ errors?: Record<string, string> }>();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const isSubmitting = fetcher.state !== "idle";
@@ -970,7 +962,7 @@ function RefundRequestForm({ slug, amount }: { slug: string; amount: number }) {
         someone has read your note.
       </p>
       <p className="mb-3 text-xs font-medium text-destructive">
-        {REFUND_PROGRESS_WARNING}
+        {isTeamPurchase ? REFUND_TEAM_PURCHASE_NOTICE : REFUND_PROGRESS_WARNING}
       </p>
       <fetcher.Form
         method="post"

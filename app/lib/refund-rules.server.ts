@@ -4,6 +4,8 @@ import {
   coupons,
   refunds,
   RefundStatus,
+  lessonProgress,
+  LessonProgressStatus,
   lessons,
   modules,
   videoWatchEvents,
@@ -15,21 +17,45 @@ import type { Database, DatabaseReader } from "~/lib/database-types";
 
 export const REFUND_WINDOW_DAYS = 14;
 export const MAX_WATCHED_HOURS = 2;
+// A learner who has completed this share of a course's lessons can no longer
+// get a refund.
+export const REFUND_COMPLETION_LIMIT = 0.5;
 
 // Server-side refund rules, shared by everything that handles refund
 // requests. Functions that read the database take it as a last argument
 // (defaulting to the app database) so tests can pass an in-memory one.
 
 /**
- * A purchase made at a purchasing-power price is given back at what was paid,
- * not at the list price of the course.
+ * What a refund gives back. A team purchase is given back at what was paid,
+ * which covers every seat. A solo purchase made at a purchasing-power price
+ * is also given back at what was paid; otherwise at the course's list price.
  */
 export function getRefundableAmount(
-  purchase: Pick<typeof purchases.$inferSelect, "amountPaid" | "country">,
+  purchase: Pick<typeof purchases.$inferSelect, "amountPaid" | "country"> & {
+    isTeamPurchase: boolean;
+  },
   course: Pick<typeof courses.$inferSelect, "price">
 ): number {
+  if (purchase.isTeamPurchase) return purchase.amountPaid;
   const pppDiscount = getDiscountForCountry(purchase.country);
   return pppDiscount > 0 ? purchase.amountPaid : course.price;
+}
+
+/**
+ * A team purchase is one that minted seat codes. A team purchase never gives
+ * the buyer an enrollment of their own. Voided codes still count: the rows
+ * record that the purchase minted seats.
+ */
+export function isTeamPurchase(
+  purchaseId: number,
+  database: DatabaseReader = db
+): boolean {
+  const seat = database
+    .select({ id: coupons.id })
+    .from(coupons)
+    .where(eq(coupons.purchaseId, purchaseId))
+    .get();
+  return seat !== undefined;
 }
 
 // The window is counted in whole days, not hours — someone who buys at 23:00
@@ -98,6 +124,33 @@ export function getWatchedSeconds(
     .all();
 
   return furthestPerLesson.reduce((total, row) => total + row.furthest, 0);
+}
+
+/**
+ * Whether the learner has completed at least REFUND_COMPLETION_LIMIT of the
+ * course's lessons, which closes the refund request.
+ */
+export function hasCompletedTooMuch(
+  userId: number,
+  courseId: number,
+  database: DatabaseReader = db
+): boolean {
+  const lessonIds = getCourseLessonIds(courseId, database);
+  if (lessonIds.length === 0) return false;
+
+  const completed = database
+    .select({ id: lessonProgress.id })
+    .from(lessonProgress)
+    .where(
+      and(
+        eq(lessonProgress.userId, userId),
+        eq(lessonProgress.status, LessonProgressStatus.Completed),
+        inArray(lessonProgress.lessonId, lessonIds)
+      )
+    )
+    .all();
+
+  return completed.length / lessonIds.length >= REFUND_COMPLETION_LIMIT;
 }
 
 /** Whether any seat of a team purchase has been claimed. */

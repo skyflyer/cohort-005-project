@@ -7,6 +7,8 @@ import {
   isWithinRefundWindow,
   getWatchedSeconds,
   hasClaimedSeat,
+  hasCompletedTooMuch,
+  isTeamPurchase,
   hasApprovedRefundForCourse,
   hasOpenRefundRequest,
   hasWatchedTooMuch,
@@ -17,27 +19,48 @@ describe("getRefundableAmount", () => {
     // India is a discounted PPP country; the learner paid 5000 on a 10000 course
     expect(getDiscountForCountry("IN")).toBeGreaterThan(0);
     expect(
-      getRefundableAmount({ amountPaid: 5000, country: "IN" }, { price: 10000 })
+      getRefundableAmount({ amountPaid: 5000, country: "IN", isTeamPurchase: false }, { price: 10000 })
     ).toBe(5000);
   });
 
   it("gives back the list price for a non-PPP purchase", () => {
     expect(
-      getRefundableAmount({ amountPaid: 9000, country: "US" }, { price: 10000 })
+      getRefundableAmount({ amountPaid: 9000, country: "US", isTeamPurchase: false }, { price: 10000 })
     ).toBe(10000);
   });
 
   it("gives back the list price, not a coupon-reduced amount paid, for a non-PPP purchase", () => {
     expect(getDiscountForCountry("US")).toBe(0);
     expect(
-      getRefundableAmount({ amountPaid: 7000, country: "US" }, { price: 10000 })
+      getRefundableAmount({ amountPaid: 7000, country: "US", isTeamPurchase: false }, { price: 10000 })
     ).toBe(10000);
   });
 
   it("gives back the list price when the country is unknown", () => {
     expect(
-      getRefundableAmount({ amountPaid: 9000, country: null }, { price: 10000 })
+      getRefundableAmount({ amountPaid: 9000, country: null, isTeamPurchase: false }, { price: 10000 })
     ).toBe(10000);
+  });
+});
+
+describe("getRefundableAmount for a team purchase", () => {
+  it("gives back everything paid, covering every seat", () => {
+    // 5 seats at 9000 each: more than the list price of one seat
+    expect(
+      getRefundableAmount(
+        { amountPaid: 45000, country: "US", isTeamPurchase: true },
+        { price: 10000 }
+      )
+    ).toBe(45000);
+  });
+
+  it("gives back what was paid, not the list price, even under purchasing-power pricing", () => {
+    expect(
+      getRefundableAmount(
+        { amountPaid: 15000, country: "IN", isTeamPurchase: true },
+        { price: 10000 }
+      )
+    ).toBe(15000);
   });
 });
 
@@ -335,5 +358,87 @@ describe("hasApprovedRefundForCourse", () => {
     expect(hasApprovedRefundForCourse(user.id, course.id + 1, testDb)).toBe(
       false
     );
+  });
+});
+
+describe("isTeamPurchase", () => {
+  function setup() {
+    const testDb = createTestDb();
+    const { user, course } = seedBaseData(testDb);
+    const purchase = testDb
+      .insert(schema.purchases)
+      .values({ userId: user.id, courseId: course.id, amountPaid: 100 })
+      .returning()
+      .get();
+    return { testDb, user, course, purchase };
+  }
+
+  it("is false for a purchase that minted no seat codes", () => {
+    const { testDb, purchase } = setup();
+    expect(isTeamPurchase(purchase.id, testDb)).toBe(false);
+  });
+
+  it("is true once the purchase has minted seat codes, even voided ones", () => {
+    const { testDb, course, purchase } = setup();
+    const team = testDb.insert(schema.teams).values({}).returning().get();
+    testDb
+      .insert(schema.coupons)
+      .values({
+        teamId: team.id,
+        courseId: course.id,
+        code: "SEAT-1",
+        purchaseId: purchase.id,
+        voidedAt: "2026-11-05T10:00:00.000Z",
+      })
+      .run();
+    expect(isTeamPurchase(purchase.id, testDb)).toBe(true);
+  });
+});
+
+describe("hasCompletedTooMuch", () => {
+  function setup(lessonCount: number) {
+    const testDb = createTestDb();
+    const { user, course } = seedBaseData(testDb);
+    const mod = testDb
+      .insert(schema.modules)
+      .values({ courseId: course.id, title: "M", position: 1 })
+      .returning()
+      .get();
+    const lessonIds = Array.from({ length: lessonCount }, (_, i) =>
+      testDb
+        .insert(schema.lessons)
+        .values({ moduleId: mod.id, title: `L${i}`, position: i + 1 })
+        .returning()
+        .get().id
+    );
+    const complete = (count: number) =>
+      lessonIds.slice(0, count).forEach((lessonId) =>
+        testDb
+          .insert(schema.lessonProgress)
+          .values({
+            userId: user.id,
+            lessonId,
+            status: schema.LessonProgressStatus.Completed,
+          })
+          .run()
+      );
+    return { testDb, user, course, complete };
+  }
+
+  it("is false below half of the lessons", () => {
+    const { testDb, user, course, complete } = setup(4);
+    complete(1);
+    expect(hasCompletedTooMuch(user.id, course.id, testDb)).toBe(false);
+  });
+
+  it("is true at exactly half of the lessons", () => {
+    const { testDb, user, course, complete } = setup(4);
+    complete(2);
+    expect(hasCompletedTooMuch(user.id, course.id, testDb)).toBe(true);
+  });
+
+  it("is false for a course with no lessons", () => {
+    const { testDb, user, course } = setup(0);
+    expect(hasCompletedTooMuch(user.id, course.id, testDb)).toBe(false);
   });
 });
