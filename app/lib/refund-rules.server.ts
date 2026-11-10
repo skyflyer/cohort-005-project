@@ -12,11 +12,11 @@ import {
   type courses,
   purchases,
 } from "~/db/schema";
+import { MAX_WATCHED_HOURS } from "~/lib/refund-limits";
 import { getDiscountForCountry } from "~/lib/ppp";
 import type { Database, DatabaseReader } from "~/lib/database-types";
 
 export const REFUND_WINDOW_DAYS = 14;
-export const MAX_WATCHED_HOURS = 2;
 // A learner who has completed this share of a course's lessons can no longer
 // get a refund.
 export const REFUND_COMPLETION_LIMIT = 0.5;

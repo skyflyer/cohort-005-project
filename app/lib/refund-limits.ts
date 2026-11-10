@@ -1,3 +1,8 @@
+import { z } from "zod";
+
+/** A learner who has watched this many hours of a course can no longer get a refund. */
+export const MAX_WATCHED_HOURS = 2;
+
 /** The longest decline message an admin can send, in characters. */
 export const MAX_DECLINE_MESSAGE_LENGTH = 1000;
 
@@ -13,3 +18,13 @@ export const REFUND_TEAM_PURCHASE_NOTICE =
 export function getRefundWarning(isTeamPurchase: boolean): string {
   return isTeamPurchase ? REFUND_TEAM_PURCHASE_NOTICE : REFUND_PROGRESS_WARNING;
 }
+
+/** Validates the decline message: trimmed, not blank, not too long. */
+export const declineMessageSchema = z
+  .string()
+  .trim()
+  .min(1, "Write a decline message so the learner knows why.")
+  .max(
+    MAX_DECLINE_MESSAGE_LENGTH,
+    `Please keep the decline message under ${MAX_DECLINE_MESSAGE_LENGTH} characters.`
+  );

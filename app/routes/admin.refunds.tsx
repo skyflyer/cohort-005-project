@@ -11,8 +11,11 @@ import {
   declineRefundRequest,
   getOpenRefundRequests,
 } from "~/lib/refund-requests.server";
-import { MAX_DECLINE_MESSAGE_LENGTH } from "~/lib/refund-limits";
-import { MAX_WATCHED_HOURS } from "~/lib/refund-rules.server";
+import {
+  declineMessageSchema,
+  MAX_DECLINE_MESSAGE_LENGTH,
+  MAX_WATCHED_HOURS,
+} from "~/lib/refund-limits";
 import { formatPrice } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
@@ -57,9 +60,7 @@ export async function action({ request }: Route.ActionArgs) {
   const parsed = parseFormData(formData, adminRefundActionSchema);
 
   if (!parsed.success) {
-    throw data(Object.values(parsed.errors)[0] ?? "Invalid input.", {
-      status: 400,
-    });
+    return data({ errors: parsed.errors }, { status: 400 });
   }
 
   if (parsed.data.intent === "approve") {
@@ -106,9 +107,11 @@ type RefundRequest = Route.ComponentProps["loaderData"]["refundRequests"][number
 function RefundRequestCard({ request }: { request: RefundRequest }) {
   const fetcher = useFetcher<typeof action>();
   const [confirmingApproval, setConfirmingApproval] = useState(false);
+  const errors =
+    fetcher.data && "errors" in fetcher.data ? fetcher.data.errors : undefined;
 
   useEffect(() => {
-    if (fetcher.state === "idle" && fetcher.data) {
+    if (fetcher.state === "idle" && fetcher.data && "message" in fetcher.data) {
       toast.success(fetcher.data.message);
     }
   }, [fetcher.state, fetcher.data]);
@@ -238,8 +241,14 @@ function RefundRequestCard({ request }: { request: RefundRequest }) {
             name="declineMessage"
             required
             maxLength={MAX_DECLINE_MESSAGE_LENGTH}
+            aria-invalid={errors?.declineMessage ? true : undefined}
             placeholder="Tell the learner why the request was declined. They will receive this by email."
           />
+          {errors?.declineMessage && (
+            <p role="alert" className="text-sm text-destructive">
+              {errors.declineMessage}
+            </p>
+          )}
           <Button
             type="submit"
             variant="outline"
