@@ -31,3 +31,6 @@
 # Generated reports. Each file is local to one machine.
 reports/
 
+
+# playwright-cli snapshots and logs
+.playwright-cli/
