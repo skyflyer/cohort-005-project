@@ -737,7 +737,7 @@ describe("requestRefund", () => {
       const current = testDb.select().from(schema.purchases).get();
       if (!current) throw new Error("purchase missing");
       return requestRefund(
-        { learner: user, course, purchase: current, reason },
+        { learner: user, course, purchaseId: current.id, reason },
         testDb
       );
     };
@@ -826,7 +826,7 @@ describe("requestRefund eligibility rules", () => {
         {
           learner: user,
           course,
-          purchase: current,
+          purchaseId: current.id,
           reason: "It was not what I expected.",
         },
         testDb
@@ -900,5 +900,222 @@ describe("requestRefund eligibility rules", () => {
     watch(2 * 60 * 60, new Date().toISOString());
 
     expect(() => ask()).toThrow(refused(403));
+  });
+});
+
+describe("requestRefund for a named purchase", () => {
+  const reason = "It was not what I expected.";
+
+  function setupTwoPurchases() {
+    const base = setup();
+    const { testDb, user, instructor, course, lesson, purchase: solo } = base;
+    const now = new Date().toISOString();
+    testDb
+      .update(schema.purchases)
+      .set({ createdAt: now })
+      .where(eq(schema.purchases.id, solo.id))
+      .run();
+
+    const teamPurchase = (seats = 3, createdAt = now) => {
+      const team = testDb.insert(schema.teams).values({}).returning().get();
+      const bought = testDb
+        .insert(schema.purchases)
+        .values({
+          userId: user.id,
+          courseId: course.id,
+          amountPaid: 9000 * seats,
+          country: "US",
+          createdAt,
+        })
+        .returning()
+        .get();
+      const codes = Array.from({ length: seats }, (_, i) =>
+        testDb
+          .insert(schema.coupons)
+          .values({
+            teamId: team.id,
+            courseId: course.id,
+            code: `T${bought.id}-${i}`,
+            purchaseId: bought.id,
+          })
+          .returning()
+          .get()
+      );
+      return { purchase: bought, codes };
+    };
+
+    const ask = (purchaseId: number, learner = user) =>
+      requestRefund({ learner, course, purchaseId, reason }, testDb);
+    const refused = (status: number) =>
+      expect.objectContaining({ init: expect.objectContaining({ status }) });
+    const completeAndWatch = () => {
+      testDb
+        .insert(schema.lessonProgress)
+        .values({
+          userId: user.id,
+          lessonId: lesson.id,
+          status: schema.LessonProgressStatus.Completed,
+        })
+        .run();
+      testDb
+        .insert(schema.videoWatchEvents)
+        .values({
+          userId: user.id,
+          lessonId: lesson.id,
+          eventType: "pause",
+          positionSeconds: 3 * 60 * 60,
+        })
+        .run();
+    };
+    return {
+      ...base,
+      solo,
+      teamPurchase,
+      ask,
+      refused,
+      completeAndWatch,
+      otherUser: instructor,
+    };
+  }
+
+  it("refunds a team purchase despite 100% completion and over 2 hours watched", () => {
+    const { testDb, teamPurchase, ask, completeAndWatch } = setupTwoPurchases();
+    const { purchase } = teamPurchase();
+    completeAndWatch();
+
+    const { email } = ask(purchase.id);
+
+    expect(email.body).toContain(REFUND_TEAM_PURCHASE_NOTICE);
+    expect(
+      testDb
+        .select()
+        .from(schema.refunds)
+        .where(eq(schema.refunds.purchaseId, purchase.id))
+        .all()
+    ).toHaveLength(1);
+  });
+
+  it("still refuses a solo purchase at the completion and watch limits", () => {
+    const { solo, ask, completeAndWatch, refused } = setupTwoPurchases();
+    completeAndWatch();
+
+    expect(() => ask(solo.id)).toThrow(refused(403));
+  });
+
+  it("lets a buyer with only a team purchase request a refund", () => {
+    const { testDb, solo, teamPurchase, ask } = setupTwoPurchases();
+    const { purchase } = teamPurchase();
+    testDb.delete(schema.purchases).where(eq(schema.purchases.id, solo.id)).run();
+
+    expect(() => ask(purchase.id)).not.toThrow();
+  });
+
+  it("lets a buyer with both purchases refund either one independently", () => {
+    const { testDb, solo, teamPurchase, ask } = setupTwoPurchases();
+    const { purchase: team } = teamPurchase();
+
+    ask(team.id);
+    ask(solo.id);
+
+    expect(testDb.select().from(schema.refunds).all()).toHaveLength(2);
+  });
+
+  it("refuses a purchase that is not the learner's", () => {
+    const { solo, ask, otherUser, refused } = setupTwoPurchases();
+
+    expect(() => ask(solo.id, otherUser)).toThrow(refused(403));
+  });
+
+  it("refuses a purchase of another course", () => {
+    const { testDb, user, instructor, course, solo, ask, refused } =
+      setupTwoPurchases();
+    const other = testDb
+      .insert(schema.courses)
+      .values({
+        title: "Other",
+        slug: "other",
+        description: "d",
+        salesCopy: "Sales copy.",
+        instructorId: instructor.id,
+        categoryId: course.categoryId,
+        status: schema.CourseStatus.Published,
+        price: 5000,
+      })
+      .returning()
+      .get();
+    const otherPurchase = testDb
+      .insert(schema.purchases)
+      .values({ userId: user.id, courseId: other.id, amountPaid: 5000 })
+      .returning()
+      .get();
+
+    expect(() => ask(otherPurchase.id)).toThrow(refused(403));
+    expect(() => ask(99999)).toThrow(refused(403));
+    expect(solo.id).not.toBe(otherPurchase.id);
+  });
+
+  it("refuses a team purchase with a claimed seat", () => {
+    const { testDb, instructor, teamPurchase, ask, refused } =
+      setupTwoPurchases();
+    const { purchase, codes } = teamPurchase();
+    testDb
+      .update(schema.coupons)
+      .set({ redeemedByUserId: instructor.id, redeemedAt: LATER })
+      .where(eq(schema.coupons.id, codes[0].id))
+      .run();
+
+    expect(() => ask(purchase.id)).toThrow(refused(403));
+  });
+
+  it("refuses a team purchase outside the refund window", () => {
+    const { teamPurchase, ask, refused } = setupTwoPurchases();
+    const { purchase } = teamPurchase(2, "2020-01-01T10:00:00.000Z");
+
+    expect(() => ask(purchase.id)).toThrow(refused(403));
+  });
+
+  it("refuses a second request on a team purchase that is already open or refunded", () => {
+    const { testDb, teamPurchase, ask, refused } = setupTwoPurchases();
+    const { purchase } = teamPurchase();
+
+    ask(purchase.id);
+    expect(() => ask(purchase.id)).toThrow(refused(409));
+
+    testDb
+      .update(schema.refunds)
+      .set({ status: schema.RefundStatus.Approved })
+      .where(eq(schema.refunds.purchaseId, purchase.id))
+      .run();
+    expect(() => ask(purchase.id)).toThrow(refused(409));
+  });
+
+  it("does not let a refunded team purchase block a refund of the solo purchase", () => {
+    const { testDb, solo, teamPurchase, ask } = setupTwoPurchases();
+    const { purchase: team } = teamPurchase();
+    testDb
+      .insert(schema.refunds)
+      .values({
+        purchaseId: team.id,
+        status: schema.RefundStatus.Approved,
+        reason,
+      })
+      .run();
+
+    expect(() => ask(solo.id)).not.toThrow();
+  });
+
+  it("does not let a refunded solo purchase block a refund of a team purchase", () => {
+    const { testDb, solo, teamPurchase, ask } = setupTwoPurchases();
+    const { purchase: team } = teamPurchase();
+    testDb
+      .insert(schema.refunds)
+      .values({
+        purchaseId: solo.id,
+        status: schema.RefundStatus.Approved,
+        reason,
+      })
+      .run();
+
+    expect(() => ask(team.id)).not.toThrow();
   });
 });

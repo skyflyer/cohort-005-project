@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, lte, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, lte, notExists, sql } from "drizzle-orm";
 import { db } from "~/db";
 import {
   coupons,
@@ -9,7 +9,7 @@ import {
   lessons,
   modules,
   videoWatchEvents,
-  type courses,
+  courses,
   purchases,
 } from "~/db/schema";
 import { MAX_WATCHED_HOURS } from "~/lib/refund-limits";
@@ -206,9 +206,29 @@ export function hasOpenRefundRequest(
   return open !== undefined;
 }
 
+/** Whether the purchase itself already has an approved refund. */
+export function hasApprovedRefundForPurchase(
+  purchaseId: number,
+  database: Database = db
+): boolean {
+  const approved = database
+    .select({ id: refunds.id })
+    .from(refunds)
+    .where(
+      and(
+        eq(refunds.purchaseId, purchaseId),
+        eq(refunds.status, RefundStatus.Approved)
+      )
+    )
+    .get();
+  return approved !== undefined;
+}
+
 /**
- * Whether any purchase of the course by the learner was refunded. A learner
- * gets one refund per course, even if they bought it again afterwards.
+ * Whether the learner's own (solo) access to the course was refunded. A
+ * learner gets one refund per course for their own access, even if they
+ * bought it again afterwards. A refunded team purchase does not count: it
+ * never gave the buyer access, so it neither blocks nor is blocked by this.
  */
 export function hasApprovedRefundForCourse(
   userId: number,
@@ -223,9 +243,157 @@ export function hasApprovedRefundForCourse(
       and(
         eq(purchases.userId, userId),
         eq(purchases.courseId, courseId),
-        eq(refunds.status, RefundStatus.Approved)
+        eq(refunds.status, RefundStatus.Approved),
+        notExists(
+          database
+            .select({ id: coupons.id })
+            .from(coupons)
+            .where(eq(coupons.purchaseId, purchases.id))
+        )
       )
     )
     .get();
   return approved !== undefined;
+}
+
+/**
+ * Whether a refund request on this purchase could still be accepted, judged
+ * by the rules about the purchase itself: the window, no open or approved
+ * request on it, no claimed seat, and for a solo purchase the one refund per
+ * course. The learner's own progress limits apply to a solo purchase only.
+ * Returns the first reason it cannot, or null.
+ */
+export function getRefundBlock(
+  learner: { id: number },
+  course: { id: number },
+  purchase: Pick<typeof purchases.$inferSelect, "id" | "createdAt">,
+  database: Database = db
+): { message: string; status: number } | null {
+  const team = isTeamPurchase(purchase.id, database);
+
+  if (!team && hasApprovedRefundForCourse(learner.id, course.id, database)) {
+    return {
+      message:
+        "You have already had a refund for this course, so we cannot accept another refund request for it.",
+      status: 409,
+    };
+  }
+  if (hasApprovedRefundForPurchase(purchase.id, database)) {
+    return {
+      message: "This purchase has already been refunded.",
+      status: 409,
+    };
+  }
+  if (hasOpenRefundRequest(purchase.id, database)) {
+    return {
+      message: "You already have a request open on this purchase.",
+      status: 409,
+    };
+  }
+  if (hasClaimedSeat(purchase.id, database)) {
+    return { message: "A claimed team seat cannot be refunded.", status: 403 };
+  }
+  if (!isWithinRefundWindow(purchase.createdAt)) {
+    return {
+      message: `The ${REFUND_WINDOW_DAYS}-day window has closed.`,
+      status: 403,
+    };
+  }
+  if (team) return null;
+  if (
+    hasWatchedTooMuch(getWatchedSeconds(learner.id, course.id, undefined, database))
+  ) {
+    return {
+      message: "You have watched too much of this course to request a refund.",
+      status: 403,
+    };
+  }
+  if (hasCompletedTooMuch(learner.id, course.id, database)) {
+    return {
+      message: `You have completed ${REFUND_COMPLETION_LIMIT * 100}% or more of this course, so we cannot accept a refund request for it.`,
+      status: 403,
+    };
+  }
+  return null;
+}
+
+/**
+ * What the learner is offered for this purchase if they want their money
+ * back, or null if a refund request would be refused. The page and the
+ * request share getRefundBlock, so they cannot disagree.
+ */
+export function getRefundOffer(
+  learner: { id: number },
+  course: Pick<typeof courses.$inferSelect, "id" | "price">,
+  purchase: Pick<
+    typeof purchases.$inferSelect,
+    "id" | "createdAt" | "amountPaid" | "country"
+  >,
+  database: Database = db
+): { purchaseId: number; amount: number; isTeamPurchase: boolean } | null {
+  if (getRefundBlock(learner, course, purchase, database)) return null;
+  const terms = getRefundTerms(purchase, course, database);
+  return {
+    purchaseId: purchase.id,
+    amount: terms.amount,
+    isTeamPurchase: terms.isTeamPurchase,
+  };
+}
+
+/**
+ * The learner's latest purchase of the course that is not a team purchase: the
+ * one that enrolled them. Undefined if they only bought team seats.
+ */
+export function getLatestSoloPurchase(
+  userId: number,
+  courseId: number,
+  database: Database = db
+) {
+  return database
+    .select()
+    .from(purchases)
+    .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
+    .orderBy(desc(purchases.createdAt), desc(purchases.id))
+    .all()
+    .find((purchase) => !isTeamPurchase(purchase.id, database));
+}
+
+/**
+ * The learner's team purchases (ones that minted seat codes), newest first,
+ * each with the course and the refund state the team page needs: what a
+ * refund offers, or the status of the latest request on it.
+ */
+export function getTeamPurchaseRefunds(
+  userId: number,
+  database: Database = db
+) {
+  const rows = database
+    .select({
+      purchase: purchases,
+      course: courses,
+    })
+    .from(purchases)
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .where(eq(purchases.userId, userId))
+    .orderBy(desc(purchases.createdAt), desc(purchases.id))
+    .all()
+    .filter((row) => isTeamPurchase(row.purchase.id, database));
+
+  return rows.map(({ purchase, course }) => {
+    const latest = database
+      .select({ status: refunds.status })
+      .from(refunds)
+      .where(eq(refunds.purchaseId, purchase.id))
+      .orderBy(desc(refunds.requestedAt), desc(refunds.id))
+      .get();
+    return {
+      purchaseId: purchase.id,
+      courseSlug: course.slug,
+      courseTitle: course.title,
+      purchasedAt: purchase.createdAt,
+      amountPaid: purchase.amountPaid,
+      refundStatus: latest?.status ?? null,
+      offer: getRefundOffer({ id: userId }, course, purchase, database),
+    };
+  });
 }

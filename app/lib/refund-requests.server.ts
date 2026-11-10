@@ -10,16 +10,11 @@ import {
   users,
 } from "~/db/schema";
 import {
+  getRefundBlock,
   getRefundTerms,
   hasClaimedSeat,
   getWatchedSeconds,
-  hasApprovedRefundForCourse,
-  hasCompletedTooMuch,
-  hasOpenRefundRequest,
   hasWatchedTooMuch,
-  isWithinRefundWindow,
-  REFUND_COMPLETION_LIMIT,
-  REFUND_WINDOW_DAYS,
 } from "~/lib/refund-rules.server";
 import {
   countLessonsWithProgress,
@@ -163,60 +158,39 @@ export function buildRefundDeclineEmail(input: {
 }
 
 /**
- * Records a learner's refund request on their latest purchase of a course,
- * after every rule that can refuse it. Throws a response when refused.
- * Returns the request-received email for the caller to send.
+ * Records a learner's refund request on the named purchase, after every rule
+ * that can refuse it. The purchase must be the learner's own and for the
+ * course. A team purchase skips the learner's own completion and watch
+ * limits. Throws a response when refused. Returns the request-received email
+ * for the caller to send.
  */
 export function requestRefund(
   input: {
     learner: Pick<typeof users.$inferSelect, "id" | "name" | "email">;
     course: Pick<typeof courses.$inferSelect, "id" | "title" | "price">;
-    purchase: typeof purchases.$inferSelect;
+    purchaseId: number;
     reason: string;
   },
   database: Database = db
 ) {
-  const { learner, course, purchase } = input;
+  const { learner, course } = input;
 
-  if (hasApprovedRefundForCourse(learner.id, course.id, database)) {
-    throw data(
-      "You have already had a refund for this course, so we cannot accept another refund request for it.",
-      { status: 409 }
-    );
-  }
-
-  if (hasOpenRefundRequest(purchase.id, database)) {
-    throw data("You already have a request open on this purchase.", {
-      status: 409,
-    });
-  }
-
-  // A seat that came out of a team licence, and has been claimed, belongs to
-  // the team — the learner cannot hand it back on their own.
-  if (hasClaimedSeat(purchase.id, database)) {
-    throw data("A claimed team seat cannot be refunded.", { status: 403 });
-  }
-
-  if (!isWithinRefundWindow(purchase.createdAt)) {
-    throw data(`The ${REFUND_WINDOW_DAYS}-day window has closed.`, {
-      status: 403,
-    });
-  }
+  const purchase = database
+    .select()
+    .from(purchases)
+    .where(eq(purchases.id, input.purchaseId))
+    .get();
 
   if (
-    hasWatchedTooMuch(getWatchedSeconds(learner.id, course.id, undefined, database))
+    !purchase ||
+    purchase.userId !== learner.id ||
+    purchase.courseId !== course.id
   ) {
-    throw data("You have watched too much of this course to request a refund.", {
-      status: 403,
-    });
+    throw data("You have not bought this course.", { status: 403 });
   }
 
-  if (hasCompletedTooMuch(learner.id, course.id, database)) {
-    throw data(
-      `You have completed ${REFUND_COMPLETION_LIMIT * 100}% or more of this course, so we cannot accept a refund request for it.`,
-      { status: 403 }
-    );
-  }
+  const block = getRefundBlock(learner, course, purchase, database);
+  if (block) throw data(block.message, { status: block.status });
 
   const terms = getRefundTerms(purchase, course, database);
 

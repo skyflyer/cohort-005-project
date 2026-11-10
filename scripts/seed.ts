@@ -2735,6 +2735,8 @@ This course is still in draft while the cluster examples are rewritten against t
   );
 
   // Four seats on Design Systems, bought during launch week, none redeemed yet.
+  // Marta has no enrolment of her own, so this is a team-only buyer whose pack
+  // is still refundable from /team.
   createTeamPurchase(
     "marta.novak@student.dev",
     course3,

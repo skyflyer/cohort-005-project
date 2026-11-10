@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { getDiscountForCountry } from "~/lib/ppp";
@@ -13,6 +14,8 @@ import {
   hasApprovedRefundForCourse,
   hasOpenRefundRequest,
   hasWatchedTooMuch,
+  getLatestSoloPurchase,
+  getTeamPurchaseRefunds,
 } from "./refund-rules.server";
 
 describe("getRefundableAmount", () => {
@@ -469,5 +472,70 @@ describe("getRefundTerms", () => {
       amount: 45000,
       isTeamPurchase: true,
     });
+  });
+});
+
+describe("team purchase refund helpers", () => {
+  function setupBuyer() {
+    const testDb = createTestDb();
+    const { user, course } = seedBaseData(testDb);
+    const now = new Date().toISOString();
+    const solo = testDb
+      .insert(schema.purchases)
+      .values({ userId: user.id, courseId: course.id, amountPaid: 9000, createdAt: "2026-01-01T10:00:00.000Z" })
+      .returning()
+      .get();
+    const team = testDb.insert(schema.teams).values({}).returning().get();
+    const pack = testDb
+      .insert(schema.purchases)
+      .values({ userId: user.id, courseId: course.id, amountPaid: 27000, country: "US", createdAt: now })
+      .returning()
+      .get();
+    testDb
+      .insert(schema.coupons)
+      .values({ teamId: team.id, courseId: course.id, code: "PACK-1", purchaseId: pack.id })
+      .run();
+    return { testDb, user, course, solo, pack };
+  }
+
+  it("getLatestSoloPurchase skips a newer team purchase", () => {
+    const { testDb, user, course, solo } = setupBuyer();
+    expect(getLatestSoloPurchase(user.id, course.id, testDb)?.id).toBe(solo.id);
+  });
+
+  it("getLatestSoloPurchase is undefined for a buyer with only a pack", () => {
+    const { testDb, user, course, solo } = setupBuyer();
+    testDb.delete(schema.purchases).where(eq(schema.purchases.id, solo.id)).run();
+    expect(getLatestSoloPurchase(user.id, course.id, testDb)).toBeUndefined();
+  });
+
+  it("getTeamPurchaseRefunds lists only packs, with the refundable amount", () => {
+    const { testDb, user, pack } = setupBuyer();
+    const rows = getTeamPurchaseRefunds(user.id, testDb);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      purchaseId: pack.id,
+      refundStatus: null,
+      offer: { amount: 27000, isTeamPurchase: true },
+    });
+  });
+
+  it("getTeamPurchaseRefunds offers nothing once a seat is claimed, and shows an open request", () => {
+    const { testDb, user, pack } = setupBuyer();
+    testDb
+      .insert(schema.refunds)
+      .values({ purchaseId: pack.id, status: schema.RefundStatus.Requested, reason: "Not needed any more." })
+      .run();
+    expect(getTeamPurchaseRefunds(user.id, testDb)[0]).toMatchObject({
+      offer: null,
+      refundStatus: schema.RefundStatus.Requested,
+    });
+
+    testDb.delete(schema.refunds).run();
+    testDb
+      .update(schema.coupons)
+      .set({ redeemedByUserId: user.id, redeemedAt: new Date().toISOString() })
+      .run();
+    expect(getTeamPurchaseRefunds(user.id, testDb)[0].offer).toBeNull();
   });
 });

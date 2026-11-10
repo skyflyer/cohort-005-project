@@ -42,16 +42,10 @@ import { CourseImage } from "~/components/course-image";
 import { UserAvatar } from "~/components/user-avatar";
 import { Textarea } from "~/components/ui/textarea";
 import { data, isRouteErrorResponse } from "react-router";
-import { getRefundWarning } from "~/lib/refund-limits";
+import { RefundRequestForm } from "~/components/refund-request-form";
 import {
-  getRefundTerms,
-  getWatchedSeconds,
-  hasApprovedRefundForCourse,
-  hasClaimedSeat,
-  hasCompletedTooMuch,
-  hasOpenRefundRequest,
-  hasWatchedTooMuch,
-  isWithinRefundWindow,
+  getLatestSoloPurchase,
+  getRefundOffer,
 } from "~/lib/refund-rules.server";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
@@ -376,37 +370,20 @@ function rateCourse(userId: number, courseId: number, rating: number) {
     .get();
 }
 
-function getPurchaseForCourse(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(purchases)
-    .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
-    .orderBy(sql`${purchases.createdAt} desc`)
-    .get();
-}
-
 /**
- * What the learner is offered if they want their money back, or null if they
- * cannot request a refund for this purchase.
+ * What the learner is offered if they want their money back on their own
+ * (solo) purchase, the one that enrolled them, or null if they cannot request
+ * a refund. A team purchase is refunded from the team page instead.
  */
 function getRefundRequestOffer(
   userId: number,
   course: { id: number; price: number }
 ) {
-  const purchase = getPurchaseForCourse(userId, course.id);
+  const purchase = getLatestSoloPurchase(userId, course.id);
 
   if (!purchase) return null;
-  if (hasOpenRefundRequest(purchase.id)) return null;
-  if (hasApprovedRefundForCourse(userId, course.id)) return null;
-  if (!isWithinRefundWindow(purchase.createdAt)) return null;
 
-  if (hasCompletedTooMuch(userId, course.id)) return null;
-  if (hasWatchedTooMuch(getWatchedSeconds(userId, course.id))) return null;
-  if (hasClaimedSeat(purchase.id)) return null;
-
-  const terms = getRefundTerms(purchase, course);
-
-  return { amount: terms.amount, isTeamPurchase: terms.isTeamPurchase };
+  return getRefundOffer({ id: userId }, course, purchase);
 }
 
 const ratingSchema = z.object({
@@ -442,6 +419,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
   let refundRequestOffer: {
+    purchaseId: number;
     amount: number;
     isTeamPurchase: boolean;
   } | null = null;
@@ -837,6 +815,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                   {refundRequestOffer && (
                     <RefundRequestForm
                       slug={course.slug}
+                      purchaseId={refundRequestOffer.purchaseId}
                       amount={refundRequestOffer.amount}
                       isTeamPurchase={refundRequestOffer.isTeamPurchase}
                     />
@@ -908,80 +887,6 @@ function RateCourse({ userRating }: { userRating: number | null }) {
           Click a star to change your rating.
         </p>
       )}
-    </div>
-  );
-}
-
-function RefundRequestForm({
-  slug,
-  amount,
-  isTeamPurchase,
-}: {
-  slug: string;
-  amount: number;
-  isTeamPurchase: boolean;
-}) {
-  const fetcher = useFetcher<{ errors?: Record<string, string> }>();
-  const [isFormOpen, setIsFormOpen] = useState(false);
-  const isSubmitting = fetcher.state !== "idle";
-
-  useEffect(() => {
-    const firstError = Object.values(fetcher.data?.errors ?? {})[0];
-    if (fetcher.state === "idle" && firstError) {
-      toast.error(firstError);
-    }
-  }, [fetcher.state, fetcher.data]);
-
-  if (!isFormOpen) {
-    return (
-      <div className="border-t pt-4">
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full text-muted-foreground"
-          onClick={() => setIsFormOpen(true)}
-        >
-          Request a refund
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="border-t pt-4">
-      <p className="mb-2 text-sm font-medium">Request a refund</p>
-      <p className="mb-3 text-xs text-muted-foreground">
-        We will send {formatPrice(amount)} back to the card you paid with, once
-        someone has read your note.
-      </p>
-      <p className="mb-3 text-xs font-medium text-destructive">
-        {getRefundWarning(isTeamPurchase)}
-      </p>
-      <fetcher.Form
-        method="post"
-        action={`/courses/${slug}/refund`}
-        className="space-y-2"
-      >
-        <Textarea
-          name="reason"
-          rows={3}
-          required
-          placeholder="What went wrong?"
-        />
-        <div className="flex gap-2">
-          <Button type="submit" size="sm" disabled={isSubmitting}>
-            {isSubmitting ? "Sending..." : "Send refund request"}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => setIsFormOpen(false)}
-          >
-            Keep it
-          </Button>
-        </div>
-      </fetcher.Form>
     </div>
   );
 }

@@ -14,8 +14,12 @@ import {
   courses,
   users,
   TeamMemberRole,
+  RefundStatus,
 } from "~/db/schema";
 import { eq, and } from "drizzle-orm";
+import { getTeamPurchaseRefunds } from "~/lib/refund-rules.server";
+import { RefundRequestForm } from "~/components/refund-request-form";
+import { formatPrice } from "~/lib/utils";
 
 function getTeamForAdmin(userId: number) {
   const membership = db
@@ -149,7 +153,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
-  return { courseStats, couponRows };
+  const teamPurchases = getTeamPurchaseRefunds(currentUserId);
+
+  return { courseStats, couponRows, teamPurchases };
 }
 
 function CopyButton({ code }: { code: string }) {
@@ -185,7 +191,7 @@ function CopyButton({ code }: { code: string }) {
 }
 
 export default function Team({ loaderData }: Route.ComponentProps) {
-  const { courseStats, couponRows } = loaderData;
+  const { courseStats, couponRows, teamPurchases } = loaderData;
   const [courseFilter, setCourseFilter] = useState<number | "all">("all");
 
   const filteredCoupons =
@@ -244,6 +250,44 @@ export default function Team({ loaderData }: Route.ComponentProps) {
               </CardContent>
             </Card>
           ))}
+        </div>
+      )}
+
+      {/* Team purchases and their refunds */}
+      {teamPurchases.length > 0 && (
+        <div className="mb-8">
+          <h2 className="mb-4 text-lg font-semibold">Team purchases</h2>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {teamPurchases.map((purchase) => (
+              <Card key={purchase.purchaseId}>
+                <CardHeader className="pb-2">
+                  <h3 className="font-semibold truncate">
+                    {purchase.courseTitle}
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Bought {new Date(purchase.purchasedAt).toLocaleDateString()}{" "}
+                    for {formatPrice(purchase.amountPaid)}
+                  </p>
+                </CardHeader>
+                <CardContent>
+                  {purchase.offer ? (
+                    <RefundRequestForm
+                      slug={purchase.courseSlug}
+                      purchaseId={purchase.purchaseId}
+                      amount={purchase.offer.amount}
+                      isTeamPurchase={purchase.offer.isTeamPurchase}
+                    />
+                  ) : purchase.refundStatus === RefundStatus.Requested ? (
+                    <p className="text-sm text-muted-foreground">
+                      Refund request open: waiting for the team to review it.
+                    </p>
+                  ) : purchase.refundStatus === RefundStatus.Approved ? (
+                    <p className="text-sm text-muted-foreground">Refunded</p>
+                  ) : null}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
         </div>
       )}
 

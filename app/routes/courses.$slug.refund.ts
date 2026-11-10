@@ -3,12 +3,8 @@ import { z } from "zod";
 import type { Route } from "./+types/courses.$slug.refund";
 import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
-import {
-  courses,
-  purchases,
-  users,
-} from "~/db/schema";
-import { and, eq, sql } from "drizzle-orm";
+import { courses, users } from "~/db/schema";
+import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
 import { requestRefund } from "~/lib/refund-requests.server";
 
@@ -17,6 +13,7 @@ const refundParamsSchema = z.object({
 });
 
 const refundActionSchema = z.object({
+  purchaseId: z.coerce.number().int().positive(),
   reason: z
     .string()
     .trim()
@@ -26,15 +23,6 @@ const refundActionSchema = z.object({
 
 function getCourseBySlug(slug: string) {
   return db.select().from(courses).where(eq(courses.slug, slug)).get();
-}
-
-function getLatestPurchase(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(purchases)
-    .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
-    .orderBy(sql`${purchases.createdAt} desc`)
-    .get();
 }
 
 export async function action({ params, request }: Route.ActionArgs) {
@@ -61,12 +49,6 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("User not found", { status: 404 });
   }
 
-  const purchase = getLatestPurchase(currentUserId, course.id);
-
-  if (!purchase) {
-    throw data("You have not bought this course.", { status: 403 });
-  }
-
   const formData = await request.formData();
   const parsed = parseFormData(formData, refundActionSchema);
 
@@ -75,7 +57,12 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   const { email } = requestRefund(
-    { learner, course, purchase, reason: parsed.data.reason },
+    {
+      learner,
+      course,
+      purchaseId: parsed.data.purchaseId,
+      reason: parsed.data.reason,
+    },
     db
   );
 
