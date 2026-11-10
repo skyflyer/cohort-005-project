@@ -46,6 +46,7 @@ import { RefundRequestForm } from "~/components/refund-request-form";
 import {
   getLatestSoloPurchase,
   getRefundOffer,
+  type RefundOffer,
 } from "~/lib/refund-rules.server";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
@@ -383,7 +384,7 @@ function getRefundRequestOffer(
 
   if (!purchase) return null;
 
-  return getRefundOffer({ id: userId }, course, purchase);
+  return getRefundOffer(userId, course, purchase);
 }
 
 const ratingSchema = z.object({
@@ -418,11 +419,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
-  let refundRequestOffer: {
-    purchaseId: number;
-    amount: number;
-    isTeamPurchase: boolean;
-  } | null = null;
+  let refundRequestOffer: RefundOffer | null = null;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);

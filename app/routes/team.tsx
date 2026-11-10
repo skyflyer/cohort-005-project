@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { Link } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router";
+import { toast } from "sonner";
 import type { Route } from "./+types/team";
 import { getCurrentUserId } from "~/lib/session";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
@@ -192,6 +193,17 @@ function CopyButton({ code }: { code: string }) {
 
 export default function Team({ loaderData }: Route.ComponentProps) {
   const { courseStats, couponRows, teamPurchases } = loaderData;
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  useEffect(() => {
+    if (searchParams.get("refundRequested")) {
+      toast.success(
+        "Refund request sent. We will email you when it has been reviewed."
+      );
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
   const [courseFilter, setCourseFilter] = useState<number | "all">("all");
 
   const filteredCoupons =

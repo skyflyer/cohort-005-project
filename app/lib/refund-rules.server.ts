@@ -263,15 +263,15 @@ export function hasApprovedRefundForCourse(
  * course. The learner's own progress limits apply to a solo purchase only.
  * Returns the first reason it cannot, or null.
  */
-export function getRefundBlock(
-  learner: { id: number },
+export function getRefundRefusal(
+  userId: number,
   course: { id: number },
   purchase: Pick<typeof purchases.$inferSelect, "id" | "createdAt">,
   database: Database = db
 ): { message: string; status: number } | null {
-  const team = isTeamPurchase(purchase.id, database);
+  const isTeam = isTeamPurchase(purchase.id, database);
 
-  if (!team && hasApprovedRefundForCourse(learner.id, course.id, database)) {
+  if (!isTeam && hasApprovedRefundForCourse(userId, course.id, database)) {
     return {
       message:
         "You have already had a refund for this course, so we cannot accept another refund request for it.",
@@ -299,16 +299,16 @@ export function getRefundBlock(
       status: 403,
     };
   }
-  if (team) return null;
+  if (isTeam) return null;
   if (
-    hasWatchedTooMuch(getWatchedSeconds(learner.id, course.id, undefined, database))
+    hasWatchedTooMuch(getWatchedSeconds(userId, course.id, undefined, database))
   ) {
     return {
       message: "You have watched too much of this course to request a refund.",
       status: 403,
     };
   }
-  if (hasCompletedTooMuch(learner.id, course.id, database)) {
+  if (hasCompletedTooMuch(userId, course.id, database)) {
     return {
       message: `You have completed ${REFUND_COMPLETION_LIMIT * 100}% or more of this course, so we cannot accept a refund request for it.`,
       status: 403,
@@ -317,21 +317,27 @@ export function getRefundBlock(
   return null;
 }
 
+export type RefundOffer = {
+  purchaseId: number;
+  amount: number;
+  isTeamPurchase: boolean;
+};
+
 /**
  * What the learner is offered for this purchase if they want their money
  * back, or null if a refund request would be refused. The page and the
- * request share getRefundBlock, so they cannot disagree.
+ * request share getRefundRefusal, so they cannot disagree.
  */
 export function getRefundOffer(
-  learner: { id: number },
+  userId: number,
   course: Pick<typeof courses.$inferSelect, "id" | "price">,
   purchase: Pick<
     typeof purchases.$inferSelect,
     "id" | "createdAt" | "amountPaid" | "country"
   >,
   database: Database = db
-): { purchaseId: number; amount: number; isTeamPurchase: boolean } | null {
-  if (getRefundBlock(learner, course, purchase, database)) return null;
+): RefundOffer | null {
+  if (getRefundRefusal(userId, course, purchase, database)) return null;
   const terms = getRefundTerms(purchase, course, database);
   return {
     purchaseId: purchase.id,
@@ -393,7 +399,7 @@ export function getTeamPurchaseRefunds(
       purchasedAt: purchase.createdAt,
       amountPaid: purchase.amountPaid,
       refundStatus: latest?.status ?? null,
-      offer: getRefundOffer({ id: userId }, course, purchase, database),
+      offer: getRefundOffer(userId, course, purchase, database),
     };
   });
 }

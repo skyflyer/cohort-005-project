@@ -10,7 +10,7 @@ import {
   users,
 } from "~/db/schema";
 import {
-  getRefundBlock,
+  getRefundRefusal,
   getRefundTerms,
   hasClaimedSeat,
   getWatchedSeconds,
@@ -189,8 +189,8 @@ export function requestRefund(
     throw data("You have not bought this course.", { status: 403 });
   }
 
-  const block = getRefundBlock(learner, course, purchase, database);
-  if (block) throw data(block.message, { status: block.status });
+  const refusal = getRefundRefusal(learner.id, course, purchase, database);
+  if (refusal) throw data(refusal.message, { status: refusal.status });
 
   const terms = getRefundTerms(purchase, course, database);
 
@@ -204,6 +204,7 @@ export function requestRefund(
     .run();
 
   return {
+    isTeamPurchase: terms.isTeamPurchase,
     email: buildRefundRequestEmail({
       learnerName: learner.name,
       learnerEmail: learner.email,

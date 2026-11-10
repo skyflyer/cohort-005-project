@@ -56,7 +56,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     return data({ errors: parsed.errors }, { status: 400 });
   }
 
-  const { email } = requestRefund(
+  const { email, isTeamPurchase } = requestRefund(
     {
       learner,
       course,
@@ -68,5 +68,6 @@ export async function action({ params, request }: Route.ActionArgs) {
 
   console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
 
-  return redirect("/settings");
+  // A pack is refunded from the team page, so go back there.
+  return redirect(isTeamPurchase ? "/team?refundRequested=1" : "/settings");
 }
