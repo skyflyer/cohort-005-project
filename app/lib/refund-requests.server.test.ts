@@ -809,3 +809,96 @@ describe("requestRefund", () => {
     expect(email.body).not.toContain(REFUND_PROGRESS_WARNING);
   });
 });
+
+describe("requestRefund eligibility rules", () => {
+  function setupEligible() {
+    const base = setup();
+    const { testDb, user, course, purchase } = base;
+    testDb
+      .update(schema.purchases)
+      .set({ createdAt: new Date().toISOString() })
+      .where(eq(schema.purchases.id, purchase.id))
+      .run();
+    const ask = () => {
+      const current = testDb.select().from(schema.purchases).get();
+      if (!current) throw new Error("purchase missing");
+      return requestRefund(
+        {
+          learner: user,
+          course,
+          purchase: current,
+          reason: "It was not what I expected.",
+        },
+        testDb
+      );
+    };
+    const refused = (status: number) =>
+      expect.objectContaining({ init: expect.objectContaining({ status }) });
+    return { ...base, ask, refused };
+  }
+
+  it("refuses with a 409 when the learner already had a refund for the course", () => {
+    const { testDb, user, course, request, ask, refused } = setupEligible();
+    // an earlier purchase of the same course, refunded
+    const earlier = testDb
+      .insert(schema.purchases)
+      .values({ userId: user.id, courseId: course.id, amountPaid: 9000 })
+      .returning()
+      .get();
+    testDb
+      .insert(schema.refunds)
+      .values({
+        purchaseId: earlier.id,
+        status: schema.RefundStatus.Approved,
+        reason: "Earlier refund.",
+      })
+      .run();
+    request();
+
+    expect(() => ask()).toThrow(refused(409));
+  });
+
+  it("refuses with a 409 when the purchase already has an open request", () => {
+    const { request, ask, refused } = setupEligible();
+    request();
+
+    expect(() => ask()).toThrow(refused(409));
+  });
+
+  it("refuses with a 403 when a team seat was claimed", () => {
+    const { testDb, instructor, course, purchase, ask, refused } =
+      setupEligible();
+    const team = testDb.insert(schema.teams).values({}).returning().get();
+    testDb
+      .insert(schema.coupons)
+      .values({
+        teamId: team.id,
+        courseId: course.id,
+        code: "CLAIMED-1",
+        purchaseId: purchase.id,
+        redeemedByUserId: instructor.id,
+        redeemedAt: LATER,
+      })
+      .run();
+
+    expect(() => ask()).toThrow(refused(403));
+  });
+
+  it("refuses with a 403 outside the refund window", () => {
+    const { testDb, purchase, ask, refused } = setupEligible();
+    testDb
+      .update(schema.purchases)
+      .set({ createdAt: "2020-01-01T10:00:00.000Z" })
+      .where(eq(schema.purchases.id, purchase.id))
+      .run();
+
+    expect(() => ask()).toThrow(refused(403));
+  });
+
+  it("refuses with a 403 when the learner watched 2 hours or more", () => {
+    const { watch, ask, refused } = setupEligible();
+    watch(2 * 60 * 60, new Date().toISOString());
+
+    expect(() => ask()).toThrow(refused(403));
+  });
+});
