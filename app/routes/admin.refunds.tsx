@@ -16,7 +16,7 @@ import {
   MAX_DECLINE_MESSAGE_LENGTH,
   MAX_WATCHED_HOURS,
 } from "~/lib/refund-limits";
-import { formatPrice } from "~/lib/utils";
+import { formatDate, formatPrice } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
@@ -95,14 +95,6 @@ function formatWatchTime(seconds: number): string {
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
 }
 
 type RefundRequest = Route.ComponentProps["loaderData"]["refundRequests"][number];

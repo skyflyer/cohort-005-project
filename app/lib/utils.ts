@@ -74,3 +74,16 @@ export function formatDuration(
   }
   return `${mStr}m`;
 }
+
+/**
+ * A date such as "Nov 6, 2026". The locale and time zone are fixed so the
+ * server and the browser render the same text (no hydration mismatch).
+ */
+export function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}

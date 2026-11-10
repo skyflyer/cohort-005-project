@@ -20,7 +20,7 @@ import {
 import { eq, and } from "drizzle-orm";
 import { getTeamPurchaseRefunds } from "~/lib/refund-rules.server";
 import { RefundRequestForm } from "~/components/refund-request-form";
-import { formatPrice } from "~/lib/utils";
+import { formatDate, formatPrice } from "~/lib/utils";
 
 function getTeamForAdmin(userId: number) {
   const membership = db
@@ -277,7 +277,7 @@ export default function Team({ loaderData }: Route.ComponentProps) {
                     {purchase.courseTitle}
                   </h3>
                   <p className="text-xs text-muted-foreground">
-                    Bought {new Date(purchase.purchasedAt).toLocaleDateString()}{" "}
+                    Bought {formatDate(purchase.purchasedAt)}{" "}
                     for {formatPrice(purchase.amountPaid)}
                   </p>
                 </CardHeader>
