@@ -29,14 +29,7 @@ const adminRefundActionSchema = z.discriminatedUnion("intent", [
   z.object({
     intent: z.literal("decline"),
     refundId: z.coerce.number().int(),
-    declineMessage: z
-      .string()
-      .trim()
-      .min(1, "Write a decline message so the learner knows why.")
-      .max(
-        MAX_DECLINE_MESSAGE_LENGTH,
-        `Please keep the decline message under ${MAX_DECLINE_MESSAGE_LENGTH} characters.`
-      ),
+    declineMessage: declineMessageSchema,
   }),
 ]);
 
@@ -60,7 +53,17 @@ export async function action({ request }: Route.ActionArgs) {
   const parsed = parseFormData(formData, adminRefundActionSchema);
 
   if (!parsed.success) {
-    return data({ errors: parsed.errors }, { status: 400 });
+    // Only the decline message is typed by the admin, so only its error has
+    // a field to show on. Anything else is a malformed request.
+    if (parsed.errors.declineMessage) {
+      return data(
+        { errors: { declineMessage: parsed.errors.declineMessage } },
+        { status: 400 }
+      );
+    }
+    throw data(Object.values(parsed.errors)[0] ?? "Invalid input.", {
+      status: 400,
+    });
   }
 
   if (parsed.data.intent === "approve") {
