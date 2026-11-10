@@ -10,21 +10,23 @@ import {
   users,
 } from "~/db/schema";
 import {
-  getRefundableAmount,
+  getRefundTerms,
   hasClaimedSeat,
-  isTeamPurchase,
   getWatchedSeconds,
+  hasApprovedRefundForCourse,
+  hasCompletedTooMuch,
+  hasOpenRefundRequest,
   hasWatchedTooMuch,
+  isWithinRefundWindow,
+  REFUND_COMPLETION_LIMIT,
+  REFUND_WINDOW_DAYS,
 } from "~/lib/refund-rules.server";
 import {
   countLessonsWithProgress,
   deleteLearnerCourseData,
 } from "~/lib/learner-course-data.server";
 import type { Database, DatabaseReader } from "~/lib/database-types";
-import {
-  REFUND_PROGRESS_WARNING,
-  REFUND_TEAM_PURCHASE_NOTICE,
-} from "~/lib/refund-limits";
+import { getRefundWarning } from "~/lib/refund-limits";
 import { formatPrice } from "~/lib/utils";
 
 // Both the review list and the decline action start from a refund joined to
@@ -66,7 +68,11 @@ export function getOpenRefundRequests(database: Database = db) {
     .all();
 
   return rows.map((row) => {
-    const isTeam = isTeamPurchase(row.purchaseId, database);
+    const terms = getRefundTerms(
+      { id: row.purchaseId, amountPaid: row.amountPaid, country: row.country },
+      { price: row.coursePrice },
+      database
+    );
     const currentWatchedSeconds = getWatchedSeconds(
       row.learnerId,
       row.courseId,
@@ -79,15 +85,8 @@ export function getOpenRefundRequests(database: Database = db) {
       learnerEmail: row.learnerEmail,
       courseTitle: row.courseTitle,
       purchasedAt: row.purchasedAt,
-      refundableAmount: getRefundableAmount(
-        {
-          amountPaid: row.amountPaid,
-          country: row.country,
-          isTeamPurchase: isTeam,
-        },
-        { price: row.coursePrice }
-      ),
-      isTeamPurchase: isTeam,
+      refundableAmount: terms.amount,
+      isTeamPurchase: terms.isTeamPurchase,
       reason: row.reason,
       requestedAt: row.requestedAt,
       watchedSecondsAtRequest: getWatchedSeconds(
@@ -99,7 +98,7 @@ export function getOpenRefundRequests(database: Database = db) {
       currentWatchedSeconds,
       isOverWatchLimitNow: hasWatchedTooMuch(currentWatchedSeconds),
       // A team purchase never deletes the buyer's own progress.
-      lessonsWithProgress: isTeam
+      lessonsWithProgress: terms.isTeamPurchase
         ? 0
         : countLessonsWithProgress(row.learnerId, row.courseId, database),
       hasClaimedSeat: hasClaimedSeat(row.purchaseId, database),
@@ -127,9 +126,7 @@ export function buildRefundRequestEmail(input: {
       `We have your refund request for "${input.courseTitle}".`,
       `The refund would be ${formatPrice(input.amount)}, the amount you paid.`,
       "",
-      input.isTeamPurchase
-        ? REFUND_TEAM_PURCHASE_NOTICE
-        : REFUND_PROGRESS_WARNING,
+      getRefundWarning(input.isTeamPurchase),
       "",
       "Our team reviews every refund request by hand. You do not need to do anything else — we will email you again when it is done.",
       "",
@@ -162,6 +159,84 @@ export function buildRefundDeclineEmail(input: {
       "",
       "— The Cadence team",
     ].join("\n"),
+  };
+}
+
+/**
+ * Records a learner's refund request on their latest purchase of a course,
+ * after every rule that can refuse it. Throws a response when refused.
+ * Returns the request-received email for the caller to send.
+ */
+export function requestRefund(
+  input: {
+    learner: Pick<typeof users.$inferSelect, "id" | "name" | "email">;
+    course: Pick<typeof courses.$inferSelect, "id" | "title" | "price">;
+    purchase: typeof purchases.$inferSelect;
+    reason: string;
+  },
+  database: Database = db
+) {
+  const { learner, course, purchase } = input;
+
+  if (hasApprovedRefundForCourse(learner.id, course.id, database)) {
+    throw data(
+      "You have already had a refund for this course, so we cannot accept another refund request for it.",
+      { status: 409 }
+    );
+  }
+
+  if (hasOpenRefundRequest(purchase.id, database)) {
+    throw data("You already have a request open on this purchase.", {
+      status: 409,
+    });
+  }
+
+  // A seat that came out of a team licence, and has been claimed, belongs to
+  // the team — the learner cannot hand it back on their own.
+  if (hasClaimedSeat(purchase.id, database)) {
+    throw data("A claimed team seat cannot be refunded.", { status: 403 });
+  }
+
+  if (!isWithinRefundWindow(purchase.createdAt)) {
+    throw data(`The ${REFUND_WINDOW_DAYS}-day window has closed.`, {
+      status: 403,
+    });
+  }
+
+  if (
+    hasWatchedTooMuch(getWatchedSeconds(learner.id, course.id, undefined, database))
+  ) {
+    throw data("You have watched too much of this course to request a refund.", {
+      status: 403,
+    });
+  }
+
+  if (hasCompletedTooMuch(learner.id, course.id, database)) {
+    throw data(
+      `You have completed ${REFUND_COMPLETION_LIMIT * 100}% or more of this course, so we cannot accept a refund request for it.`,
+      { status: 403 }
+    );
+  }
+
+  const terms = getRefundTerms(purchase, course, database);
+
+  database
+    .insert(refunds)
+    .values({
+      purchaseId: purchase.id,
+      status: RefundStatus.Requested,
+      reason: input.reason,
+    })
+    .run();
+
+  return {
+    email: buildRefundRequestEmail({
+      learnerName: learner.name,
+      learnerEmail: learner.email,
+      courseTitle: course.title,
+      amount: terms.amount,
+      isTeamPurchase: terms.isTeamPurchase,
+    }),
   };
 }
 
@@ -226,6 +301,12 @@ export function declineRefundRequest(
   };
 }
 
+// Past tense: what happened, where getRefundWarning says what would happen.
+const APPROVED_SOLO_NOTICE =
+  "As we warned when you asked, your access to the course has ended and your progress for it has been deleted.";
+const APPROVED_TEAM_NOTICE =
+  "The seat codes from this purchase that nobody had used yet no longer work. Your own access to the course has not changed.";
+
 /**
  * The email the learner gets when their refund request is approved. There is
  * no mail transport wired up yet, so the caller logs the built message.
@@ -246,9 +327,7 @@ export function buildRefundApprovalEmail(input: {
       `Your refund request for "${input.courseTitle}" has been approved.`,
       `We are refunding ${formatPrice(input.amount)} to your card.`,
       "",
-      input.isTeamPurchase
-        ? "The seat codes from this purchase that nobody had used yet no longer work. Your own access to the course has not changed."
-        : "As we warned when you asked, your access to the course has ended and your progress for it has been deleted.",
+      input.isTeamPurchase ? APPROVED_TEAM_NOTICE : APPROVED_SOLO_NOTICE,
       "",
       "— The Cadence team",
     ].join("\n"),
@@ -291,15 +370,16 @@ export function approveRefundRequest(
       );
     }
 
-    const isTeam = isTeamPurchase(found.purchaseId, tx);
-    const amountRefunded = getRefundableAmount(
+    const terms = getRefundTerms(
       {
+        id: found.purchaseId,
         amountPaid: found.amountPaid,
         country: found.country,
-        isTeamPurchase: isTeam,
       },
-      { price: found.coursePrice }
+      { price: found.coursePrice },
+      tx
     );
+    const amountRefunded = terms.amount;
 
     // Only update a row that is still open, so two admins resolving the same
     // request cannot both succeed.
@@ -327,7 +407,7 @@ export function approveRefundRequest(
 
     // A team purchase never gave the buyer an enrollment, so their own
     // access and progress (perhaps from a separate solo purchase) stay.
-    if (!isTeam) {
+    if (!terms.isTeamPurchase) {
       deleteLearnerCourseData(tx, found.learnerId, found.courseId);
     }
 
@@ -340,7 +420,7 @@ export function approveRefundRequest(
       )
       .run();
 
-    return { ...found, amountRefunded, isTeam };
+    return { ...found, amountRefunded, isTeamPurchase: terms.isTeamPurchase };
   });
 
   return {
@@ -349,7 +429,7 @@ export function approveRefundRequest(
       learnerEmail: refund.learnerEmail,
       courseTitle: refund.courseTitle,
       amount: refund.amountRefunded,
-      isTeamPurchase: refund.isTeam,
+      isTeamPurchase: refund.isTeamPurchase,
     }),
   };
 }

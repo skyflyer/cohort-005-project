@@ -8,3 +8,8 @@ export const REFUND_PROGRESS_WARNING =
 /** Shown instead of the progress warning when the purchase is a team purchase. */
 export const REFUND_TEAM_PURCHASE_NOTICE =
   "If your refund request is approved, the seat codes from this purchase that nobody has used yet will stop working. Your own access to the course is not affected.";
+
+/** The warning for the request form and the request-received email. */
+export function getRefundWarning(isTeamPurchase: boolean): string {
+  return isTeamPurchase ? REFUND_TEAM_PURCHASE_NOTICE : REFUND_PROGRESS_WARNING;
+}

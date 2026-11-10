@@ -153,6 +153,23 @@ export function hasCompletedTooMuch(
   return completed.length / lessonIds.length >= REFUND_COMPLETION_LIMIT;
 }
 
+/**
+ * What a refund of this purchase would give back, and whether it is a team
+ * purchase (which decides what else approval touches and what we tell the
+ * learner). The one place that combines the two.
+ */
+export function getRefundTerms(
+  purchase: Pick<typeof purchases.$inferSelect, "id" | "amountPaid" | "country">,
+  course: Pick<typeof courses.$inferSelect, "price">,
+  database: DatabaseReader = db
+): { amount: number; isTeamPurchase: boolean } {
+  const team = isTeamPurchase(purchase.id, database);
+  return {
+    amount: getRefundableAmount({ ...purchase, isTeamPurchase: team }, course),
+    isTeamPurchase: team,
+  };
+}
+
 /** Whether any seat of a team purchase has been claimed. */
 export function hasClaimedSeat(
   purchaseId: number,

@@ -42,18 +42,14 @@ import { CourseImage } from "~/components/course-image";
 import { UserAvatar } from "~/components/user-avatar";
 import { Textarea } from "~/components/ui/textarea";
 import { data, isRouteErrorResponse } from "react-router";
+import { getRefundWarning } from "~/lib/refund-limits";
 import {
-  REFUND_PROGRESS_WARNING,
-  REFUND_TEAM_PURCHASE_NOTICE,
-} from "~/lib/refund-limits";
-import {
-  getRefundableAmount,
+  getRefundTerms,
   getWatchedSeconds,
   hasApprovedRefundForCourse,
   hasClaimedSeat,
   hasCompletedTooMuch,
   hasOpenRefundRequest,
-  isTeamPurchase,
   hasWatchedTooMuch,
   isWithinRefundWindow,
 } from "~/lib/refund-rules.server";
@@ -408,12 +404,9 @@ function getRefundRequestOffer(
   if (hasWatchedTooMuch(getWatchedSeconds(userId, course.id))) return null;
   if (hasClaimedSeat(purchase.id)) return null;
 
-  const isTeam = isTeamPurchase(purchase.id);
+  const terms = getRefundTerms(purchase, course);
 
-  return {
-    amount: getRefundableAmount({ ...purchase, isTeamPurchase: isTeam }, course),
-    isTeamPurchase: isTeam,
-  };
+  return { amount: terms.amount, isTeamPurchase: terms.isTeamPurchase };
 }
 
 const ratingSchema = z.object({
@@ -962,7 +955,7 @@ function RefundRequestForm({
         someone has read your note.
       </p>
       <p className="mb-3 text-xs font-medium text-destructive">
-        {isTeamPurchase ? REFUND_TEAM_PURCHASE_NOTICE : REFUND_PROGRESS_WARNING}
+        {getRefundWarning(isTeamPurchase)}
       </p>
       <fetcher.Form
         method="post"

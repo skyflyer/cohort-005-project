@@ -6,26 +6,11 @@ import { db } from "~/db";
 import {
   courses,
   purchases,
-  refunds,
   users,
-  RefundStatus,
 } from "~/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
-import {
-  REFUND_COMPLETION_LIMIT,
-  REFUND_WINDOW_DAYS,
-  getRefundableAmount,
-  getWatchedSeconds,
-  hasApprovedRefundForCourse,
-  hasClaimedSeat,
-  hasCompletedTooMuch,
-  hasOpenRefundRequest,
-  isTeamPurchase,
-  hasWatchedTooMuch,
-  isWithinRefundWindow,
-} from "~/lib/refund-rules.server";
-import { buildRefundRequestEmail } from "~/lib/refund-requests.server";
+import { requestRefund } from "~/lib/refund-requests.server";
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
@@ -82,52 +67,6 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("You have not bought this course.", { status: 403 });
   }
 
-  if (hasApprovedRefundForCourse(currentUserId, course.id)) {
-    throw data(
-      "You have already had a refund for this course, so we cannot accept another refund request for it.",
-      { status: 409 }
-    );
-  }
-
-  if (hasOpenRefundRequest(purchase.id)) {
-    throw data("You already have a request open on this purchase.", {
-      status: 409,
-    });
-  }
-
-  // A seat that came out of a team licence, and has been claimed, belongs to
-  // the team — the learner cannot hand it back on their own.
-  if (hasClaimedSeat(purchase.id)) {
-    throw data("A claimed team seat cannot be refunded.", { status: 403 });
-  }
-
-  if (!isWithinRefundWindow(purchase.createdAt)) {
-    throw data(`The ${REFUND_WINDOW_DAYS}-day window has closed.`, {
-      status: 403,
-    });
-  }
-
-  const watchedSeconds = getWatchedSeconds(currentUserId, course.id);
-
-  if (hasWatchedTooMuch(watchedSeconds)) {
-    throw data("You have watched too much of this course to request a refund.", {
-      status: 403,
-    });
-  }
-
-  if (hasCompletedTooMuch(currentUserId, course.id)) {
-    throw data(
-      `You have completed ${REFUND_COMPLETION_LIMIT * 100}% or more of this course, so we cannot accept a refund request for it.`,
-      { status: 403 }
-    );
-  }
-
-  const isTeam = isTeamPurchase(purchase.id);
-  const refundableAmount = getRefundableAmount(
-    { ...purchase, isTeamPurchase: isTeam },
-    course
-  );
-
   const formData = await request.formData();
   const parsed = parseFormData(formData, refundActionSchema);
 
@@ -135,22 +74,10 @@ export async function action({ params, request }: Route.ActionArgs) {
     return data({ errors: parsed.errors }, { status: 400 });
   }
 
-  db.insert(refunds)
-    .values({
-      purchaseId: purchase.id,
-      status: RefundStatus.Requested,
-      reason: parsed.data.reason,
-    })
-    .returning()
-    .get();
-
-  const email = buildRefundRequestEmail({
-    learnerName: learner.name,
-    learnerEmail: learner.email,
-    courseTitle: course.title,
-    amount: refundableAmount,
-    isTeamPurchase: isTeam,
-  });
+  const { email } = requestRefund(
+    { learner, course, purchase, reason: parsed.data.reason },
+    db
+  );
 
   console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
 

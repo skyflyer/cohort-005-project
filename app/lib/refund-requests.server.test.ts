@@ -14,6 +14,7 @@ import {
   buildRefundRequestEmail,
   declineRefundRequest,
   getOpenRefundRequests,
+  requestRefund,
 } from "./refund-requests.server";
 
 const BOUGHT = "2026-11-01T10:00:00.000Z";
@@ -722,5 +723,89 @@ describe("getOpenRefundRequests approval details", () => {
     seat("CLAIMED-1", instructor.id);
 
     expect(getOpenRefundRequests(testDb)[0].hasClaimedSeat).toBe(true);
+  });
+});
+
+describe("requestRefund", () => {
+  const reason = "It was not what I expected.";
+
+  function setupRequest() {
+    const base = setup();
+    const { testDb, user, course } = base;
+    // Read the purchase fresh, so changes a test makes to it are seen.
+    const ask = () => {
+      const current = testDb.select().from(schema.purchases).get();
+      if (!current) throw new Error("purchase missing");
+      return requestRefund(
+        { learner: user, course, purchase: current, reason },
+        testDb
+      );
+    };
+    return { ...base, ask };
+  }
+
+  it("records an open request and returns the request email", () => {
+    const { testDb, purchase, ask } = setupRequest();
+    // inside the window: the purchase was made just now
+    testDb
+      .update(schema.purchases)
+      .set({ createdAt: new Date().toISOString() })
+      .where(eq(schema.purchases.id, purchase.id))
+      .run();
+
+    const { email } = ask();
+
+    expect(testDb.select().from(schema.refunds).get()).toMatchObject({
+      purchaseId: purchase.id,
+      status: schema.RefundStatus.Requested,
+      reason,
+    });
+    expect(email.body).toContain(REFUND_PROGRESS_WARNING);
+  });
+
+  it("refuses with a 403 at or above 50% completion", () => {
+    const { testDb, user, lesson, purchase, ask } = setupRequest();
+    testDb
+      .update(schema.purchases)
+      .set({ createdAt: new Date().toISOString() })
+      .where(eq(schema.purchases.id, purchase.id))
+      .run();
+    // the only lesson is completed: 100%
+    testDb
+      .insert(schema.lessonProgress)
+      .values({
+        userId: user.id,
+        lessonId: lesson.id,
+        status: schema.LessonProgressStatus.Completed,
+      })
+      .run();
+
+    expect(() => ask()).toThrow(expect.objectContaining({ init: { status: 403 } }));
+    expect(testDb.select().from(schema.refunds).all()).toHaveLength(0);
+  });
+
+  it("sends the team email at amountPaid for a team purchase", () => {
+    const { testDb, course, purchase, ask } = setupRequest();
+    testDb
+      .update(schema.purchases)
+      .set({ createdAt: new Date().toISOString(), amountPaid: 45000 })
+      .where(eq(schema.purchases.id, purchase.id))
+      .run();
+    const team = testDb.insert(schema.teams).values({}).returning().get();
+    testDb
+      .insert(schema.coupons)
+      .values({
+        teamId: team.id,
+        courseId: course.id,
+        code: "SEAT-1",
+        purchaseId: purchase.id,
+      })
+      .run();
+
+    const { email } = ask();
+
+    expect(email.body).toContain(formatPrice(45000));
+    expect(email.body).toContain(REFUND_TEAM_PURCHASE_NOTICE);
+    expect(email.body).not.toContain(REFUND_PROGRESS_WARNING);
   });
 });

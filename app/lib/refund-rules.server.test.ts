@@ -4,6 +4,7 @@ import * as schema from "~/db/schema";
 import { getDiscountForCountry } from "~/lib/ppp";
 import {
   getRefundableAmount,
+  getRefundTerms,
   isWithinRefundWindow,
   getWatchedSeconds,
   hasClaimedSeat,
@@ -440,5 +441,33 @@ describe("hasCompletedTooMuch", () => {
   it("is false for a course with no lessons", () => {
     const { testDb, user, course } = setup(0);
     expect(hasCompletedTooMuch(user.id, course.id, testDb)).toBe(false);
+  });
+});
+
+describe("getRefundTerms", () => {
+  it("returns the amount and whether the purchase is a team purchase", () => {
+    const testDb = createTestDb();
+    const { user, course } = seedBaseData(testDb);
+    const purchase = testDb
+      .insert(schema.purchases)
+      .values({ userId: user.id, courseId: course.id, amountPaid: 45000, country: "US" })
+      .returning()
+      .get();
+
+    expect(getRefundTerms(purchase, { price: 10000 }, testDb)).toEqual({
+      amount: 10000,
+      isTeamPurchase: false,
+    });
+
+    const team = testDb.insert(schema.teams).values({}).returning().get();
+    testDb
+      .insert(schema.coupons)
+      .values({ teamId: team.id, courseId: course.id, code: "S1", purchaseId: purchase.id })
+      .run();
+
+    expect(getRefundTerms(purchase, { price: 10000 }, testDb)).toEqual({
+      amount: 45000,
+      isTeamPurchase: true,
+    });
   });
 });
