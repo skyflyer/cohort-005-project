@@ -1,3 +1,7 @@
+## git history and remotes
+
+**NEVER** look at the upstream, that's my reference point only. You work on origin.
+
 ## Verification checks
 
 Do these checks in this order before you report a change to `app/` as complete:
