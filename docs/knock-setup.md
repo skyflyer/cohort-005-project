@@ -36,13 +36,24 @@ changes.
 | `refund-request-approved` | #48    | create + commit (to the buyer; `data.url` is `/settings` or `/team`) |
 | `refund-request-declined` | #48    | create + commit (same as approved) |
 | `refund-request-opened`   | #48    | create + commit (to every Platform Admin except the buyer; `data.url` is `/admin/refunds`) |
-| `seat-claimed`            | #49    | later  |
-| `new-enrollment`          | #49    | later  |
+| `seat-claimed`            | #49    | create + commit |
+| `new-enrollment`          | #49    | create + commit, only AFTER the default preference set below is configured |
 
 ## Environment default preference set
 
-Added by ticket #50: every workflow on by default except `new-enrollment`.
-Cadence code and database hold no defaults.
+Every workflow is on by default except `new-enrollment`. Cadence code and
+database hold no defaults.
+
+Per environment: Knock dashboard > Developers > Preference sets (Settings >
+Preferences) > edit the **default** preference set, and set:
+
+```json
+{ "workflows": { "new-enrollment": false } }
+```
+
+Leave every other workflow on (Knock's default). Do this **before** committing
+the `new-enrollment` workflow, otherwise Instructors without saved preferences
+would receive it. Instructors opt in from the Settings Notifications card.
 
 ## Checking by hand
 
@@ -50,3 +61,14 @@ Sign in with the DevUI switcher as a Student, post a Discussion Question on a
 lesson, then reply to it as another user. In the Knock dashboard (Messages
 log) the reply shows up for the question's author, and the question for the
 course's Instructor.
+
+## Checking Seats and Enrollments by hand
+
+1. As a Student, buy a Team Licence of 2 Seats, then claim one Seat from a
+   second user via `/redeem/<code>`. The Team Admin gets `seat-claimed`
+   ("1 seat left"), linking to `/team`.
+2. As an Instructor with no saved preferences, the claim and any Individual
+   Purchase send **no** `new-enrollment` (default is off). Opt in through
+   preferences (or the Knock dashboard) and enroll again: the Instructor gets
+   `new-enrollment` linking to `/instructor/<courseId>/students`.
+3. Buying a Team Licence sends nothing.

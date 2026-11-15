@@ -12,6 +12,7 @@ import { Button } from "~/components/ui/button";
 import { Ticket, AlertCircle, CheckCircle2, Globe } from "lucide-react";
 import { data } from "react-router";
 import { db } from "~/db";
+import { notifyNewEnrollment, notifySeatClaimed } from "~/lib/notifications.server";
 import { purchases, coupons, courses, enrollments } from "~/db/schema";
 import { eq, and } from "drizzle-orm";
 
@@ -41,7 +42,11 @@ const SEAT_REFUNDED =
   "This seat is no longer available. Ask the person who shared it with you.";
 
 type RedeemResult =
-  | { ok: true; enrollment: typeof enrollments.$inferSelect }
+  | {
+      ok: true;
+      enrollment: typeof enrollments.$inferSelect;
+      seatId: number;
+    }
   | { ok: false; error: string };
 
 function redeemCoupon(
@@ -109,7 +114,7 @@ function redeemCoupon(
     .returning()
     .get();
 
-  return { ok: true, enrollment };
+  return { ok: true, enrollment, seatId: coupon.id };
 }
 
 const redeemParamsSchema = z.object({
@@ -203,6 +208,11 @@ export async function action({ params, request }: Route.ActionArgs) {
   if (!result.ok) {
     return data({ error: result.error }, { status: 400 });
   }
+
+  // Two independent Notifications; notify* never rejects, so one failing
+  // can't lose the other.
+  await notifySeatClaimed(db, result.seatId);
+  await notifyNewEnrollment(db, result.enrollment.id);
 
   const course = getCourseById(result.enrollment.courseId);
   if (!course) {
