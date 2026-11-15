@@ -3,6 +3,8 @@ import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
 import { Toaster } from "sonner";
+import { FeedProvider } from "~/components/notification-feed";
+import { signFeedAuth } from "~/lib/knock-feed-auth.server";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { eq, and, or, sql, desc } from "drizzle-orm";
@@ -213,6 +215,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     countryTierInfo,
     countries: COUNTRIES,
     isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
+    feedAuth: currentUser ? await signFeedAuth(currentUser.id) : null,
   };
 }
 
@@ -225,9 +228,10 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     countryTierInfo,
     countries,
     isTeamAdmin: userIsTeamAdmin,
+    feedAuth,
   } = loaderData;
 
-  return (
+  const content = (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         currentUser={currentUser}
@@ -246,5 +250,13 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
       />
       <Toaster position="bottom-right" richColors closeButton />
     </div>
+  );
+
+  return currentUser ? (
+    <FeedProvider userId={currentUser.id} auth={feedAuth}>
+      {content}
+    </FeedProvider>
+  ) : (
+    content
   );
 }
