@@ -1,5 +1,8 @@
 import { and, eq } from "drizzle-orm";
-import { Knock } from "@knocklabs/node";
+import type { Knock } from "@knocklabs/node";
+import "~/lib/env.server";
+import { createKnockClient } from "~/lib/knock.server";
+import { knockUserId } from "~/lib/knock-user-id";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import { teamMembers, TeamMemberRole, users } from "~/db/schema";
@@ -13,25 +16,17 @@ import {
 // server. The browser never writes them (browser writes stored {} in the
 // prototype instead of true).
 
-// React Router dev doesn't load .env into process.env, so do it here too.
-try {
-  process.loadEnvFile(".env");
-} catch {
-  // no .env: loading preferences shows the error state
-}
-
 type Db = BetterSQLite3Database<typeof schema>;
 
-export type PreferenceSwitch = { key: WorkflowKey; enabled: boolean };
+// `enabled` is null when Knock could not be read: the value is unknown.
+export type PreferenceSwitch = { key: WorkflowKey; enabled: boolean | null };
 
-export type PreferencesResult =
-  | { ok: true; switches: PreferenceSwitch[] }
-  | { ok: false; switches: PreferenceSwitch[] };
+export type PreferencesResult = { ok: boolean; switches: PreferenceSwitch[] };
 
-function client(): Knock {
+function knockClient(): Knock {
   const secretKey = process.env.KNOCK_SECRET_API_KEY;
   if (!secretKey) throw new Error("KNOCK_SECRET_API_KEY is not set");
-  return new Knock({ apiKey: secretKey, timeout: 3000, maxRetries: 1 });
+  return createKnockClient(secretKey);
 }
 
 export function visibleKeysForUser(db: Db, userId: number): WorkflowKey[] {
@@ -51,15 +46,15 @@ export function visibleKeysForUser(db: Db, userId: number): WorkflowKey[] {
   return visibleWorkflowKeys({ role: user.role, isTeamAdmin });
 }
 
-// On failure returns ok:false with every switch off; the card disables them
-// and shows an error, it never presents defaults.
+// On failure returns ok:false with every value unknown (null); the card
+// disables the switches and shows an error, it never presents defaults.
 export async function loadPreferences(
   db: Db,
   userId: number
 ): Promise<PreferencesResult> {
   const keys = visibleKeysForUser(db, userId);
   try {
-    const set = await client().users.getPreferences(String(userId), "default");
+    const set = await knockClient().users.getPreferences(knockUserId(userId), "default");
     return {
       ok: true,
       switches: keys.map((key) => ({ key, enabled: readSwitchValue(set, key) })),
@@ -68,7 +63,7 @@ export async function loadPreferences(
     console.error("[notification-preferences] load failed", error);
     return {
       ok: false,
-      switches: keys.map((key) => ({ key, enabled: false })),
+      switches: keys.map((key) => ({ key, enabled: null })),
     };
   }
 }
@@ -84,7 +79,7 @@ export async function savePreferences(
     workflows[key] = enabledKeys.has(key);
   }
   try {
-    await client().users.setPreferences(String(userId), "default", {
+    await knockClient().users.setPreferences(knockUserId(userId), "default", {
       workflows,
     });
     return { ok: true };

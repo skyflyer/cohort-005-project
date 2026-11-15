@@ -1,11 +1,7 @@
 import { signUserToken } from "@knocklabs/node";
 
-// React Router dev doesn't load .env into process.env, so do it here.
-try {
-  process.loadEnvFile(".env");
-} catch {
-  // no .env: the Feed shows "Couldn't load notifications"
-}
+import "~/lib/env.server";
+import { knockUserId } from "~/lib/knock-user-id";
 
 export type FeedAuth = {
   token: string;
@@ -22,7 +18,7 @@ export async function signFeedAuth(userId: number): Promise<FeedAuth | null> {
   if (!publicKey || !channelId || !process.env.KNOCK_SIGNING_KEY) return null;
   try {
     // Reads KNOCK_SIGNING_KEY (base-64 PEM) from env.
-    const token = await signUserToken(String(userId), {
+    const token = await signUserToken(knockUserId(userId), {
       expiresInSeconds: 60 * 60,
     });
     return { token, publicKey, channelId };

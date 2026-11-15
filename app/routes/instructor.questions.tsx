@@ -3,7 +3,11 @@ import { Link, data, isRouteErrorResponse, useFetcher } from "react-router";
 import { toast } from "sonner";
 import { z } from "zod";
 import type { Route } from "./+types/instructor.questions";
-import { requireInstructorOrAdmin, requireStaff } from "~/lib/access.server";
+import {
+  requireInstructorOrAdmin,
+  requireStaff,
+  requireUserId,
+} from "~/lib/access.server";
 import { renderComment } from "~/lib/comment-markdown.server";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
@@ -12,7 +16,7 @@ import { Textarea } from "~/components/ui/textarea";
 import { UserAvatar } from "~/components/user-avatar";
 import { AlertTriangle, CheckCircle2, ExternalLink } from "lucide-react";
 import { cn, daysSince, formatRelativeTime } from "~/lib/utils";
-import { MIN_COMMENT_LENGTH, MAX_COMMENT_LENGTH } from "~/lib/comments";
+import { MAX_COMMENT_LENGTH } from "~/lib/comments";
 import { createComment } from "~/lib/comments.server";
 import { parseFormData } from "~/lib/validation";
 import { db } from "~/db";
@@ -165,12 +169,13 @@ export async function action({ request }: Route.ActionArgs) {
 
   // Answering as the course's voice — so it must be the course's own
   // instructor, or an admin.
-  const access = await requireStaff(request, course.courseId);
+  await requireStaff(request, course.courseId);
+  const userId = await requireUserId(request);
 
   try {
     await createComment(
       db,
-      access.userId!,
+      userId,
       question.lessonId,
       question.id,
       parsed.data.body

@@ -21,7 +21,13 @@ import {
   loadPreferences,
   savePreferences,
 } from "~/lib/notification-preferences.server";
-import { SWITCH_LABELS } from "~/lib/notification-preferences";
+import {
+  SWITCH_LABELS,
+  isWorkflowKey,
+} from "~/lib/notification-preferences";
+
+const saveNotificationsIntent = z.literal("save-notifications");
+const workflowKeysSchema = z.array(z.string().refine(isWorkflowKey));
 
 const settingsSchema = z.object({
   name: z.string().trim().min(1, "Name cannot be empty."),
@@ -89,11 +95,18 @@ export async function action({ request }: Route.ActionArgs) {
 
   const formData = await request.formData();
 
-  if (formData.get("intent") === "save-notifications") {
-    const enabled = new Set(
-      formData.getAll("workflow").map((value) => String(value))
+  if (saveNotificationsIntent.safeParse(formData.get("intent")).success) {
+    const workflows = workflowKeysSchema.safeParse(formData.getAll("workflow"));
+    // A tampered form, not something the person can correct.
+    if (!workflows.success) {
+      throw data("Unknown notification workflow.", { status: 400 });
+    }
+    // Knock being down is different: the card shows its degraded state.
+    const result = await savePreferences(
+      db,
+      currentUserId,
+      new Set(workflows.data)
     );
-    const result = await savePreferences(db, currentUserId, enabled);
     return result.ok
       ? { notificationsSaved: true }
       : { notificationsError: "Couldn't save your notification preferences." };
@@ -149,7 +162,8 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
     notificationsFetcher.data && "notificationsError" in notificationsFetcher.data
       ? notificationsFetcher.data.notificationsError
       : undefined;
-  const notificationsDisabled = !preferences.ok;
+  // Switches are off the table after a failed load or save; the card says why.
+  const notificationsDisabled = !preferences.ok || saveError !== undefined;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -250,7 +264,11 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                   role="switch"
                   name="workflow"
                   value={key}
-                  defaultChecked={enabled}
+                  defaultChecked={enabled ?? false}
+                  ref={(el) => {
+                    // Unknown value: show neither on nor off.
+                    if (el) el.indeterminate = enabled === null;
+                  }}
                   disabled={notificationsDisabled}
                   className="size-4"
                 />

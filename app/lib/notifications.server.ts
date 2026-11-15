@@ -1,5 +1,7 @@
 import { and, eq, isNull } from "drizzle-orm";
-import { Knock } from "@knocklabs/node";
+import "~/lib/env.server";
+import { createKnockClient } from "~/lib/knock.server";
+import { knockUserId } from "~/lib/knock-user-id";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
 import { alias } from "drizzle-orm/sqlite-core";
@@ -32,13 +34,6 @@ import {
 // `deliver(...)` from a new `notify*` function, and test it with a recording
 // sender (see notifications.server.test.ts).
 
-// React Router dev doesn't load .env into process.env, so do it here.
-try {
-  process.loadEnvFile(".env");
-} catch {
-  // no .env: defaultSender() falls back to logging
-}
-
 type Db = BetterSQLite3Database<typeof schema>;
 
 // ─── Types ───
@@ -52,7 +47,7 @@ export type WorkflowKey =
   | "discussion-question"
   | "discussion-reply";
 
-// id = String(users.id). Never carries an email or a role.
+// id = knockUserId(users.id). Never carries an email or a role.
 export type Recipient = { id: string; name: string; avatar: string | null };
 
 type Common = {
@@ -64,7 +59,6 @@ type Common = {
 };
 
 // The Feed renders rows from `data` only. `kind` equals the workflow key.
-// Later tickets fill in the non-discussion payloads as they build them.
 export type NotificationData =
   | ({ kind: "discussion-question" | "discussion-reply" } & Common & {
         lessonTitle: string;
@@ -97,7 +91,7 @@ export interface NotificationSender {
 // ─── Senders ───
 
 export function knockSender(secretKey: string): NotificationSender {
-  const knock = new Knock({ apiKey: secretKey, timeout: 3000, maxRetries: 1 });
+  const knock = createKnockClient(secretKey);
   const identify = (r: Recipient) => ({
     id: r.id,
     name: r.name,
@@ -140,7 +134,7 @@ function toRecipient(user: {
   name: string;
   avatarUrl: string | null;
 }): Recipient {
-  return { id: String(user.id), name: user.name, avatar: user.avatarUrl };
+  return { id: knockUserId(user.id), name: user.name, avatar: user.avatarUrl };
 }
 
 // Sends one trigger, or none when nobody is left after leaving out the actor.

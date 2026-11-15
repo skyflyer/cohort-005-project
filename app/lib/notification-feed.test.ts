@@ -53,15 +53,35 @@ describe("notificationSentence", () => {
       ],
       [
         { kind: "refund-request-declined", ...common },
-        [t("Your refund for "), b("Intro to TS"), t(" was "), b("declined"), t(".")],
+        [
+          t("Your refund for "),
+          b("Intro to TS"),
+          t(" was "),
+          b("declined"),
+          t(". You can ask again."),
+        ],
       ],
       [
-        { kind: "refund-request-opened", ...common },
-        [b("Ada"), t(" asked for a refund on "), b("Intro to TS"), t(".")],
+        { kind: "refund-request-opened", ...common, amountCents: 4900 },
+        [
+          b("Ada"),
+          t(" asked for a "),
+          b("$49.00"),
+          t(" refund on "),
+          b("Intro to TS"),
+          t("."),
+        ],
       ],
       [
-        { kind: "seat-claimed", ...common },
-        [b("Ada"), t(" claimed a Seat on "), b("Intro to TS"), t(".")],
+        { kind: "seat-claimed", ...common, seatsLeft: 3 },
+        [
+          b("Ada"),
+          t(" claimed a Seat on "),
+          b("Intro to TS"),
+          t(". Seats left: "),
+          b("3"),
+          t("."),
+        ],
       ],
       [
         { kind: "new-enrollment", ...common },

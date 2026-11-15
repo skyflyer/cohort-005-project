@@ -7,10 +7,17 @@ import {
 } from "react";
 import { useNavigate } from "react-router";
 import { Bell } from "lucide-react";
+import type Knock from "@knocklabs/client";
+import type {
+  Feed as KnockFeed,
+  FeedItem as KnockFeedItem,
+  FeedStoreState,
+} from "@knocklabs/client";
 import { cn } from "~/lib/utils";
 import { UserAvatar } from "~/components/user-avatar";
 import type { FeedAuth } from "~/lib/knock-feed-auth.server";
 import type { NotificationData } from "~/lib/notifications.server";
+import { knockUserId } from "~/lib/knock-user-id";
 import {
   badgeLabel,
   notificationDetail,
@@ -19,14 +26,18 @@ import {
 } from "~/lib/notification-feed";
 
 // Headless Knock feed client. One client per user id: recreated only when the
-// user id changes, never when the token string changes on revalidation.
+// user id changes. The signed token lasts an hour, so when revalidation brings
+// a fresh one it is handed to the same client via `authenticate`, which rewires
+// the feed's connections in place.
 
-type FeedItem = {
-  id: string;
-  read_at: string | null;
-  inserted_at: string;
-  data?: NotificationData;
-};
+type FeedItem = KnockFeedItem;
+
+// Knock types `data` as a loose record. Every trigger in
+// notifications.server.ts sends a NotificationData, and the pure helpers still
+// cope with a missing or unknown kind.
+function itemData(item: FeedItem): NotificationData | undefined {
+  return (item.data ?? undefined) as NotificationData | undefined;
+}
 
 type Feed = {
   items: FeedItem[];
@@ -46,6 +57,13 @@ function useFeed() {
   return feed;
 }
 
+function authenticate(knock: Knock, userId: number, token: string) {
+  // The user is already identified server-side; skip the inline identify call.
+  knock.authenticate({ id: knockUserId(userId) }, token, {
+    identificationStrategy: "skip",
+  });
+}
+
 export function FeedProvider({
   userId,
   auth,
@@ -55,9 +73,10 @@ export function FeedProvider({
   auth: FeedAuth | null;
   children: React.ReactNode;
 }) {
-  const [state, setState] = useState<any>(null);
+  const [state, setState] = useState<FeedStoreState | null>(null);
   const [error, setError] = useState(false);
-  const feedRef = useRef<any>(null);
+  const feedRef = useRef<KnockFeed | null>(null);
+  const knockRef = useRef<Knock | null>(null);
   // Latest auth, read when (re)creating the client for a new user id.
   const authRef = useRef(auth);
   authRef.current = auth;
@@ -65,24 +84,24 @@ export function FeedProvider({
   useEffect(() => {
     setState(null);
     setError(false);
-    const current = authRef.current;
-    if (!current) {
+    if (!authRef.current) {
       setError(true);
       return;
     }
     let cancelled = false;
-    let knock: any;
     (async () => {
       try {
         const { default: Knock } = await import("@knocklabs/client");
-        if (cancelled) return;
-        knock = new Knock(current.publicKey);
-        knock.authenticate(String(userId), current.token);
+        const current = authRef.current;
+        if (cancelled || !current) return;
+        const knock = new Knock(current.publicKey);
+        knockRef.current = knock;
+        authenticate(knock, userId, current.token);
         const feed = knock.feeds.initialize(current.channelId, {
           archived: "exclude",
         });
         feedRef.current = feed;
-        feed.store.subscribe((s: any) => setState({ ...s }));
+        feed.store.subscribe((s) => setState({ ...s }));
         feed.listenForUpdates();
         await feed.fetch();
         if (cancelled) return;
@@ -96,10 +115,17 @@ export function FeedProvider({
     return () => {
       cancelled = true;
       feedRef.current?.dispose();
-      knock?.teardown?.();
+      knockRef.current?.teardown();
       feedRef.current = null;
+      knockRef.current = null;
     };
   }, [userId]);
+
+  // Revalidation issues a fresh token; give it to the live client.
+  const token = auth?.token;
+  useEffect(() => {
+    if (knockRef.current && token) authenticate(knockRef.current, userId, token);
+  }, [userId, token]);
 
   const value: Feed = {
     items: state?.items ?? [],
@@ -174,7 +200,7 @@ export function NotificationBell() {
                 </li>
               )}
               {feed.items.map((item) => {
-                const detail = notificationDetail(item.data);
+                const detail = notificationDetail(itemData(item));
                 return (
                   <li key={item.id}>
                     <button
@@ -196,7 +222,7 @@ export function NotificationBell() {
                       />
                       <div className="min-w-0 flex-1">
                         <div>
-                          {notificationSentence(item.data).map((s, i) =>
+                          {notificationSentence(itemData(item)).map((s, i) =>
                             s.bold ? <b key={i}>{s.text}</b> : s.text
                           )}
                         </div>

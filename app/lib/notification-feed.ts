@@ -1,3 +1,4 @@
+import { formatPrice } from "~/lib/utils";
 import type { NotificationData } from "~/lib/notifications.server";
 
 // Pure helpers for rendering the Notification Feed. Rows are built from an
@@ -30,11 +31,25 @@ export function notificationSentence(
     case "refund-request-approved":
       return [t("Your refund for "), b(data.courseTitle), t(" was "), b("approved"), t(".")];
     case "refund-request-declined":
-      return [t("Your refund for "), b(data.courseTitle), t(" was "), b("declined"), t(".")];
+      return [t("Your refund for "), b(data.courseTitle), t(" was "), b("declined"), t(". You can ask again.")];
     case "refund-request-opened":
-      return [b(data.actorName), t(" asked for a refund on "), b(data.courseTitle), t(".")];
+      return [
+        b(data.actorName),
+        t(" asked for a "),
+        b(formatPrice(data.amountCents)),
+        t(" refund on "),
+        b(data.courseTitle),
+        t("."),
+      ];
     case "seat-claimed":
-      return [b(data.actorName), t(" claimed a Seat on "), b(data.courseTitle), t(".")];
+      return [
+        b(data.actorName),
+        t(" claimed a Seat on "),
+        b(data.courseTitle),
+        t(". Seats left: "),
+        b(String(data.seatsLeft)),
+        t("."),
+      ];
     case "new-enrollment":
       return [b(data.actorName), t(" enrolled in "), b(data.courseTitle), t(".")];
     case "discussion-question":

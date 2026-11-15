@@ -64,6 +64,15 @@ describe("readSwitchValue", () => {
     ).toBe(false);
   });
 
+  it("ignores opt-outs of channels the in-app-only workflow does not use", () => {
+    const preferenceSet = {
+      workflows: {
+        "seat-claimed": { channel_types: { in_app_feed: true, email: false } },
+      },
+    };
+    expect(readSwitchValue(preferenceSet, "seat-claimed")).toBe(true);
+  });
+
   it("treats an object with no channel opt-out as on", () => {
     expect(
       readSwitchValue(
