@@ -6,6 +6,9 @@ import {
   notifyComment,
   notifyDiscussionQuestion,
   notifyDiscussionReply,
+  // #48 refund notifications
+  notifyRefundRequestDecided,
+  notifyRefundRequestOpened,
   type NotificationSender,
 } from "./notifications.server";
 
@@ -180,5 +183,207 @@ describe("notifyComment", () => {
       boom
     );
     error.mockRestore();
+  });
+});
+
+// ─── Refund Requests (#48) ───
+
+describe("refund request notifications", () => {
+  function purchaseBy(userId: number, amountPaid = 5000) {
+    return db
+      .insert(schema.purchases)
+      .values({ userId, courseId: base.course.id, amountPaid })
+      .returning()
+      .get();
+  }
+
+  function refundFor(
+    purchaseId: number,
+    values: Partial<typeof schema.refunds.$inferInsert> = {}
+  ) {
+    return db
+      .insert(schema.refunds)
+      .values({ purchaseId, reason: "Not what I expected", ...values })
+      .returning()
+      .get();
+  }
+
+  function addTeamLicence(purchaseId: number) {
+    const team = db.insert(schema.teams).values({}).returning().get();
+    db.insert(schema.coupons)
+      .values({
+        teamId: team.id,
+        courseId: base.course.id,
+        code: `CODE-${purchaseId}`,
+        purchaseId,
+      })
+      .run();
+  }
+
+  function addAdmin(name: string, email: string) {
+    return db
+      .insert(schema.users)
+      .values({ name, email, role: UserRole.Admin })
+      .returning()
+      .get();
+  }
+
+  describe("refund-request-approved / declined", () => {
+    it("tells the Student their refund was approved, with the decision note", async () => {
+      const { sender, calls } = recordingSender();
+      const purchase = purchaseBy(base.user.id);
+      const refund = refundFor(purchase.id, {
+        status: schema.RefundStatus.Approved,
+        amountRefunded: 5000,
+        decisionNote: "Sorry it wasn't for you",
+        resolvedByUserId: admin.id,
+      });
+
+      await notifyRefundRequestDecided(db, refund.id, sender);
+
+      expect(calls).toEqual([
+        [
+          "refund-request-approved",
+          {
+            actor: { id: String(admin.id), name: "Pat Admin", avatar: null },
+            recipients: [
+              {
+                id: String(base.user.id),
+                name: base.user.name,
+                avatar: base.user.avatarUrl,
+              },
+            ],
+            data: {
+              kind: "refund-request-approved",
+              actorName: "Pat Admin",
+              actorAvatar: null,
+              courseTitle: "Test Course",
+              reason: "Not what I expected",
+              decisionNote: "Sorry it wasn't for you",
+              amountCents: 5000,
+              url: "/settings",
+            },
+          },
+          { idempotencyKey: `refund-request-approved:${refund.id}` },
+        ],
+      ]);
+    });
+
+    it("tells the Student their refund was declined, with no note when none was given", async () => {
+      const { sender, calls } = recordingSender();
+      const refund = refundFor(purchaseBy(base.user.id).id, {
+        status: schema.RefundStatus.Declined,
+        decisionNote: null,
+        resolvedByUserId: admin.id,
+      });
+
+      await notifyRefundRequestDecided(db, refund.id, sender);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toBe("refund-request-declined");
+      expect(calls[0][1].data).toMatchObject({
+        kind: "refund-request-declined",
+        decisionNote: null,
+        url: "/settings",
+      });
+      expect(calls[0][2]).toEqual({
+        idempotencyKey: `refund-request-declined:${refund.id}`,
+      });
+    });
+
+    it("sends a Team Licence decision to the Team Admin with the Team page url", async () => {
+      const { sender, calls } = recordingSender();
+      const purchase = purchaseBy(base.user.id);
+      addTeamLicence(purchase.id);
+      const refund = refundFor(purchase.id, {
+        status: schema.RefundStatus.Declined,
+        decisionNote: "Seats in use",
+        resolvedByUserId: admin.id,
+      });
+
+      await notifyRefundRequestDecided(db, refund.id, sender);
+
+      expect(calls[0][1].recipients.map((r) => r.id)).toEqual([
+        String(base.user.id),
+      ]);
+      expect(calls[0][1].data).toMatchObject({ url: "/team" });
+    });
+
+    it("does nothing for a request that is still open", async () => {
+      const { sender, calls } = recordingSender();
+      const refund = refundFor(purchaseBy(base.user.id).id);
+      await notifyRefundRequestDecided(db, refund.id, sender);
+      expect(calls).toEqual([]);
+    });
+
+    it("logs a Knock failure instead of throwing", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const failing: NotificationSender = {
+        async trigger() {
+          throw new Error("knock down");
+        },
+      };
+      const refund = refundFor(purchaseBy(base.user.id).id, {
+        status: schema.RefundStatus.Approved,
+        resolvedByUserId: admin.id,
+      });
+
+      await expect(
+        notifyRefundRequestDecided(db, refund.id, failing)
+      ).resolves.toBeUndefined();
+      expect(spy).toHaveBeenCalled();
+      spy.mockRestore();
+    });
+  });
+
+  describe("refund-request-opened", () => {
+    it("notifies every Platform Admin, queried at trigger time, with the buyer as actor", async () => {
+      const { sender, calls } = recordingSender();
+      const second = addAdmin("Sam Admin", "sam@example.com");
+      const refund = refundFor(purchaseBy(base.user.id, 4200).id, {
+        reason: "Too advanced",
+      });
+
+      await notifyRefundRequestOpened(db, refund.id, sender);
+
+      expect(calls).toHaveLength(1);
+      const [key, payload, options] = calls[0];
+      expect(key).toBe("refund-request-opened");
+      expect(payload.actor.id).toBe(String(base.user.id));
+      expect(payload.recipients.map((r) => r.id).sort()).toEqual(
+        [String(admin.id), String(second.id)].sort()
+      );
+      expect(payload.data).toEqual({
+        kind: "refund-request-opened",
+        actorName: base.user.name,
+        actorAvatar: base.user.avatarUrl,
+        courseTitle: "Test Course",
+        amountCents: 4200,
+        reason: "Too advanced",
+        url: "/admin/refunds",
+      });
+      expect(options).toEqual({
+        idempotencyKey: `refund-request-opened:${refund.id}`,
+      });
+    });
+
+    it("leaves out the buyer when the buyer is a Platform Admin", async () => {
+      const { sender, calls } = recordingSender();
+      const other = addAdmin("Sam Admin", "sam@example.com");
+      const refund = refundFor(purchaseBy(admin.id).id);
+
+      await notifyRefundRequestOpened(db, refund.id, sender);
+
+      expect(calls[0][1].recipients.map((r) => r.id)).toEqual([
+        String(other.id),
+      ]);
+    });
+
+    it("makes no call when the buyer is the only Platform Admin", async () => {
+      const { sender, calls } = recordingSender();
+      const refund = refundFor(purchaseBy(admin.id).id);
+      await notifyRefundRequestOpened(db, refund.id, sender);
+      expect(calls).toEqual([]);
+    });
   });
 });
