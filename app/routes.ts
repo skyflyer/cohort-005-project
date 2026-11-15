@@ -49,10 +49,16 @@ export default [
     route("redeem/:code", "routes/redeem.$code.tsx"),
     // PROTOTYPE (#38) — Knock spike, throwaway branch only
     route("prototype/knock", "routes/prototype.knock.tsx"),
+    // PROTOTYPE (#36) — Notification Feed UI, throwaway branch only
+    route("prototype/notifications", "routes/prototype.notifications.tsx"),
   ]),
   route("signup", "routes/signup.tsx"),
   route("login", "routes/login.tsx"),
   route("api/switch-user", "routes/api.switch-user.ts"),
+  route(
+    "prototype/notification-feed/seed",
+    "routes/prototype.notification-feed.seed.ts"
+  ),
   route("api/logout", "routes/api.logout.ts"),
   route("api/video-tracking", "routes/api.video-tracking.ts"),
   route("api/set-dev-country", "routes/api.set-dev-country.ts"),

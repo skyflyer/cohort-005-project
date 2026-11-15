@@ -3,6 +3,17 @@ import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
 import { Toaster } from "sonner";
+// PROTOTYPE (#36)
+import { getFeedAuth } from "~/lib/notification-feed-prototype.server";
+import {
+  FeedProvider,
+  FEED_VARIANTS,
+  useFeedVariant,
+  VariantAHeaderBell,
+  VariantBNavItem,
+  VariantCNavLink,
+} from "~/components/notification-feed.prototype";
+import { PrototypeSwitcher } from "~/components/prototype-switcher";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { eq, and, or, sql, desc } from "drizzle-orm";
@@ -213,6 +224,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     countryTierInfo,
     countries: COUNTRIES,
     isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
+    feedAuth: currentUser ? await getFeedAuth(currentUser) : null,
   };
 }
 
@@ -225,14 +237,24 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     countryTierInfo,
     countries,
     isTeamAdmin: userIsTeamAdmin,
+    feedAuth,
   } = loaderData;
+  const [variant, setVariant] = useFeedVariant();
 
-  return (
+  const shell = (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         currentUser={currentUser}
         recentCourses={recentCourses}
         isTeamAdmin={userIsTeamAdmin}
+        headerSlot={feedAuth && variant === "A" ? <VariantAHeaderBell /> : null}
+        navSlot={
+          feedAuth && variant === "B" ? (
+            <VariantBNavItem />
+          ) : feedAuth && variant === "C" ? (
+            <VariantCNavLink />
+          ) : null
+        }
       />
       <main className="flex-1 overflow-y-auto">
         <Outlet />
@@ -245,6 +267,18 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
         countries={countries}
       />
       <Toaster position="bottom-right" richColors closeButton />
+      <PrototypeSwitcher
+        variants={FEED_VARIANTS}
+        current={variant}
+        onChange={setVariant}
+      />
     </div>
+  );
+
+  if (!feedAuth || !currentUser) return shell;
+  return (
+    <FeedProvider userId={currentUser.id} auth={feedAuth}>
+      {shell}
+    </FeedProvider>
   );
 }
