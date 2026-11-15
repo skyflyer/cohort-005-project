@@ -13,6 +13,7 @@ import { UserAvatar } from "~/components/user-avatar";
 import { AlertTriangle, CheckCircle2, ExternalLink } from "lucide-react";
 import { cn, daysSince, formatRelativeTime } from "~/lib/utils";
 import { MIN_COMMENT_LENGTH, MAX_COMMENT_LENGTH } from "~/lib/comments";
+import { createComment } from "~/lib/comments.server";
 import { parseFormData } from "~/lib/validation";
 import { db } from "~/db";
 import {
@@ -115,47 +116,6 @@ function getCourseForLesson(lessonId: number) {
     .get();
 }
 
-function createComment(
-  userId: number,
-  lessonId: number,
-  parentId: number | null,
-  body: string
-) {
-  const trimmed = body.trim();
-  if (trimmed.length < MIN_COMMENT_LENGTH) {
-    throw new Error("Comment cannot be empty");
-  }
-  if (trimmed.length > MAX_COMMENT_LENGTH) {
-    throw new Error(
-      `Comment must be ${MAX_COMMENT_LENGTH} characters or fewer`
-    );
-  }
-
-  const course = getCourseForLesson(lessonId);
-  if (!course) {
-    throw new Error("Lesson not found");
-  }
-
-  if (parentId !== null) {
-    const parent = getCommentById(parentId);
-    if (!parent) {
-      throw new Error("Parent comment not found");
-    }
-    if (parent.lessonId !== lessonId) {
-      throw new Error("Parent comment belongs to a different lesson");
-    }
-    if (parent.parentId !== null) {
-      throw new Error("Replies can only be one level deep");
-    }
-  }
-
-  return db
-    .insert(comments)
-    .values({ userId, lessonId, parentId, body: trimmed })
-    .returning()
-    .get();
-}
-
 // A question sitting this long without an answer gets called out visually.
 const STALE_AFTER_DAYS = 3;
 
@@ -208,7 +168,8 @@ export async function action({ request }: Route.ActionArgs) {
   const access = await requireStaff(request, course.courseId);
 
   try {
-    createComment(
+    await createComment(
+      db,
       access.userId!,
       question.lessonId,
       question.id,
