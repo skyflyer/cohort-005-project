@@ -51,15 +51,11 @@ Preferences) > edit the **default** preference set, and set:
 { "workflows": { "new-enrollment": false } }
 ```
 
-Leave every other workflow on (Knock's default). Do this **before** committing
+Leave every other workflow (`refund-request-approved`, `refund-request-declined`,
+`refund-request-opened`, `seat-claimed`, `discussion-question`,
+`discussion-reply`) on (Knock's default). Do this **before** committing
 the `new-enrollment` workflow, otherwise Instructors without saved preferences
 would receive it. Instructors opt in from the Settings Notifications card.
-
-To set it: Knock dashboard > Preferences > Default preference set for the
-environment > turn on every workflow (`refund-request-approved`,
-`refund-request-declined`, `refund-request-opened`, `seat-claimed`,
-`discussion-question`, `discussion-reply`) and turn `new-enrollment` off >
-Commit. Do this in every environment.
 
 The Settings Notifications card reads and writes the person's `default`
 preference set on the server only (`app/lib/notification-preferences.server.ts`).
