@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Route } from "./+types/courses.$slug.purchase";
 import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
+import { notifyNewEnrollment } from "~/lib/notifications.server";
 import {
   courses,
   categories,
@@ -368,7 +369,8 @@ export async function action({ params, request }: Route.ActionArgs) {
       throw redirect(`/courses/${slug}`);
     }
     createPurchase(currentUserId, course.id, pppPrice, country);
-    enrollUser(currentUserId, course.id, false, false);
+    const enrollment = enrollUser(currentUserId, course.id, false, false);
+    await notifyNewEnrollment(db, enrollment.id);
     throw redirect(`/courses/${slug}/welcome`);
   }
 

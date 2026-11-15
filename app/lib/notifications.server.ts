@@ -1,8 +1,17 @@
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { Knock } from "@knocklabs/node";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
-import { comments, courses, lessons, modules, users } from "~/db/schema";
+import {
+  comments,
+  coupons,
+  courses,
+  enrollments,
+  lessons,
+  modules,
+  purchases,
+  users,
+} from "~/db/schema";
 
 // ─── Notifications ───
 // One `notify*` function per Notification (see GLOSSARY.md), delivered through
@@ -275,4 +284,87 @@ export async function notifyComment(
   } else {
     await notifyDiscussionReply(db, commentId, sender);
   }
+}
+
+// ─── Seats and Enrollments (#49) ───
+
+// A Seat is a coupon row. Tells the Team Admin who owns the Team Licence that
+// someone claimed it, and how many Seats are left. Call after the claim commits.
+export async function notifySeatClaimed(
+  db: Db,
+  seatId: number,
+  sender: NotificationSender = defaultSender()
+) {
+  const seat = db.select().from(coupons).where(eq(coupons.id, seatId)).get();
+  if (!seat || seat.redeemedByUserId === null) return;
+
+  const claimer = getUser(db, seat.redeemedByUserId);
+  const purchase = db
+    .select()
+    .from(purchases)
+    .where(eq(purchases.id, seat.purchaseId))
+    .get();
+  const course = db
+    .select()
+    .from(courses)
+    .where(eq(courses.id, seat.courseId))
+    .get();
+  const teamAdmin = purchase ? getUser(db, purchase.userId) : undefined;
+  if (!claimer || !purchase || !course || !teamAdmin) return;
+
+  const seatsLeft = db
+    .select({ id: coupons.id })
+    .from(coupons)
+    .where(
+      and(
+        eq(coupons.purchaseId, purchase.id),
+        isNull(coupons.redeemedAt),
+        isNull(coupons.refundedAt)
+      )
+    )
+    .all().length;
+
+  const actor = toRecipient(claimer);
+  await deliver(sender, "seat-claimed", seat.id, actor, [toRecipient(teamAdmin)], {
+    kind: "seat-claimed",
+    actorName: actor.name,
+    actorAvatar: actor.avatar,
+    courseTitle: course.title,
+    seatsLeft,
+    url: "/team",
+  });
+}
+
+// Tells the course's Instructor a Student enrolled (Individual Purchase or
+// Claimed Seat). Off by default in Knock's environment default preference set.
+// Never called for a Team Licence purchase: that creates no Enrollment.
+export async function notifyNewEnrollment(
+  db: Db,
+  enrollmentId: number,
+  sender: NotificationSender = defaultSender()
+) {
+  const enrollment = db
+    .select()
+    .from(enrollments)
+    .where(eq(enrollments.id, enrollmentId))
+    .get();
+  if (!enrollment) return;
+
+  const student = getUser(db, enrollment.userId);
+  const course = db
+    .select()
+    .from(courses)
+    .where(eq(courses.id, enrollment.courseId))
+    .get();
+  const instructor = course ? getUser(db, course.instructorId) : undefined;
+  if (!student || !course || !instructor) return;
+
+  const actor = toRecipient(student);
+  await deliver(sender, "new-enrollment", enrollment.id, actor, [toRecipient(instructor)], {
+    kind: "new-enrollment",
+    actorName: actor.name,
+    actorAvatar: actor.avatar,
+    courseTitle: course.title,
+    url: `/instructor/${course.id}/students`,
+  });
 }

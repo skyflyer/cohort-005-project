@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import { UserRole } from "~/db/schema";
@@ -6,6 +7,8 @@ import {
   notifyComment,
   notifyDiscussionQuestion,
   notifyDiscussionReply,
+  notifyNewEnrollment,
+  notifySeatClaimed,
   type NotificationSender,
 } from "./notifications.server";
 
@@ -179,6 +182,178 @@ describe("notifyComment", () => {
       expect.stringContaining(`discussion-question:${question.id}`),
       boom
     );
+    error.mockRestore();
+  });
+});
+
+// ─── #49: Seats and Enrollments ───
+
+describe("seats and enrollments", () => {
+  let teamAdmin: typeof schema.users.$inferSelect;
+
+  beforeEach(() => {
+    teamAdmin = db
+      .insert(schema.users)
+      .values({ name: "Tina Team", email: "tina@example.com", role: UserRole.Student })
+      .returning()
+      .get();
+  });
+
+  function buyTeamLicence(quantity: number) {
+    const purchase = db
+      .insert(schema.purchases)
+      .values({ userId: teamAdmin.id, courseId: base.course.id, amountPaid: 1000 * quantity })
+      .returning()
+      .get();
+    const team = db.insert(schema.teams).values({}).returning().get();
+    const seats = Array.from({ length: quantity }, (_, i) =>
+      db
+        .insert(schema.coupons)
+        .values({
+          teamId: team.id,
+          courseId: base.course.id,
+          code: `code-${i}`,
+          purchaseId: purchase.id,
+        })
+        .returning()
+        .get()
+    );
+    return { purchase, seats };
+  }
+
+  function claim(seatId: number, userId: number) {
+    db.update(schema.coupons)
+      .set({ redeemedByUserId: userId, redeemedAt: new Date().toISOString() })
+      .where(eq(schema.coupons.id, seatId))
+      .run();
+    return db
+      .insert(schema.enrollments)
+      .values({ userId, courseId: base.course.id })
+      .returning()
+      .get();
+  }
+
+  it("seat-claimed notifies the Team Admin with the Seats left", async () => {
+    const { sender, calls } = recordingSender();
+    const { seats } = buyTeamLicence(3);
+    claim(seats[0].id, base.user.id);
+
+    await notifySeatClaimed(db, seats[0].id, sender);
+
+    expect(calls).toEqual([
+      [
+        "seat-claimed",
+        {
+          actor: { id: String(base.user.id), name: "Test User", avatar: null },
+          recipients: [{ id: String(teamAdmin.id), name: "Tina Team", avatar: null }],
+          data: {
+            kind: "seat-claimed",
+            actorName: "Test User",
+            actorAvatar: null,
+            courseTitle: "Test Course",
+            seatsLeft: 2,
+            url: "/team",
+          },
+        },
+        { idempotencyKey: `seat-claimed:${seats[0].id}` },
+      ],
+    ]);
+  });
+
+  it("new-enrollment notifies the course's Instructor", async () => {
+    const { sender, calls } = recordingSender();
+    const enrollment = db
+      .insert(schema.enrollments)
+      .values({ userId: base.user.id, courseId: base.course.id })
+      .returning()
+      .get();
+
+    await notifyNewEnrollment(db, enrollment.id, sender);
+
+    expect(calls).toEqual([
+      [
+        "new-enrollment",
+        {
+          actor: { id: String(base.user.id), name: "Test User", avatar: null },
+          recipients: [
+            { id: String(base.instructor.id), name: "Test Instructor", avatar: null },
+          ],
+          data: {
+            kind: "new-enrollment",
+            actorName: "Test User",
+            actorAvatar: null,
+            courseTitle: "Test Course",
+            url: `/instructor/${base.course.id}/students`,
+          },
+        },
+        { idempotencyKey: `new-enrollment:${enrollment.id}` },
+      ],
+    ]);
+  });
+
+  it("a Lapsed Student enrolling again gets a new idempotency key", async () => {
+    const { sender, calls } = recordingSender();
+    const first = db
+      .insert(schema.enrollments)
+      .values({ userId: base.user.id, courseId: base.course.id })
+      .returning()
+      .get();
+    db.delete(schema.enrollments).where(eq(schema.enrollments.id, first.id)).run();
+    const second = db
+      .insert(schema.enrollments)
+      .values({ userId: base.user.id, courseId: base.course.id })
+      .returning()
+      .get();
+
+    await notifyNewEnrollment(db, second.id, sender);
+
+    expect(calls[0][2].idempotencyKey).toBe(`new-enrollment:${second.id}`);
+    expect(second.id).not.toBe(first.id);
+  });
+
+  it("a Seat claim makes two separate calls", async () => {
+    const { sender, calls } = recordingSender();
+    const { seats } = buyTeamLicence(1);
+    const enrollment = claim(seats[0].id, base.user.id);
+
+    await notifySeatClaimed(db, seats[0].id, sender);
+    await notifyNewEnrollment(db, enrollment.id, sender);
+
+    expect(calls.map((c) => c[0])).toEqual(["seat-claimed", "new-enrollment"]);
+  });
+
+  it("a Team Licence purchase sends no new-enrollment", async () => {
+    const { sender, calls } = recordingSender();
+    buyTeamLicence(2);
+
+    // Nothing enrolls: there is no Enrollment to notify about.
+    await notifyNewEnrollment(db, 9999, sender);
+
+    expect(calls).toEqual([]);
+  });
+
+  it("new-enrollment still goes out when seat-claimed throws", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { calls } = recordingSender();
+    const sender: NotificationSender = {
+      async trigger(...args) {
+        if (args[0] === "seat-claimed") throw new Error("knock down");
+        calls.push(args);
+      },
+    };
+    const { seats } = buyTeamLicence(1);
+    const enrollment = claim(seats[0].id, base.user.id);
+
+    await notifySeatClaimed(db, seats[0].id, sender);
+    await notifyNewEnrollment(db, enrollment.id, sender);
+
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining("seat-claimed"),
+      expect.stringContaining(`seat-claimed:${seats[0].id}`),
+      expect.any(Error)
+    );
+    expect(calls.map((c) => c[0])).toEqual(["new-enrollment"]);
     error.mockRestore();
   });
 });
