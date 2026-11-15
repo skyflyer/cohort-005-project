@@ -44,6 +44,16 @@ changes.
 Added by ticket #50: every workflow on by default except `new-enrollment`.
 Cadence code and database hold no defaults.
 
+To set it: Knock dashboard > Preferences > Default preference set for the
+environment > turn on every workflow (`refund-request-approved`,
+`refund-request-declined`, `refund-request-opened`, `seat-claimed`,
+`discussion-question`, `discussion-reply`) and turn `new-enrollment` off >
+Commit. Do this in every environment.
+
+The Settings Notifications card reads and writes the person's `default`
+preference set on the server only (`app/lib/notification-preferences.server.ts`).
+A switch with no value from Knock is shown as an error, never as a default.
+
 ## Checking by hand
 
 Sign in with the DevUI switcher as a Student, post a Discussion Question on a
