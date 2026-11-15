@@ -17,6 +17,11 @@ import { db } from "~/db";
 import { eq } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
 import { listRefundRequestsForBuyer } from "~/lib/refunds.server";
+import {
+  loadPreferences,
+  savePreferences,
+} from "~/lib/notification-preferences.server";
+import { SWITCH_LABELS } from "~/lib/notification-preferences";
 
 const settingsSchema = z.object({
   name: z.string().trim().min(1, "Name cannot be empty."),
@@ -51,7 +56,10 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const refundRequests = listRefundRequestsForBuyer(db, currentUserId);
 
+  const preferences = await loadPreferences(db, currentUserId);
+
   return {
+    preferences,
     user: {
       id: currentUser.id,
       name: currentUser.name,
@@ -80,6 +88,17 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   const formData = await request.formData();
+
+  if (formData.get("intent") === "save-notifications") {
+    const enabled = new Set(
+      formData.getAll("workflow").map((value) => String(value))
+    );
+    const result = await savePreferences(db, currentUserId, enabled);
+    return result.ok
+      ? { notificationsSaved: true }
+      : { notificationsError: "Couldn't save your notification preferences." };
+  }
+
   const parsed = parseFormData(formData, settingsSchema);
 
   if (!parsed.success) {
@@ -98,7 +117,8 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, refundRequests } = loaderData;
+  const { user, refundRequests, preferences } = loaderData;
+  const notificationsFetcher = useFetcher<typeof action>();
   const openCount = refundRequests.filter(
     (refundRequest) => refundRequest.status === RefundStatus.Open
   ).length;
@@ -115,6 +135,22 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
     }
   }, [fetcher.state, fetcher.data]);
 
+  useEffect(() => {
+    if (notificationsFetcher.state !== "idle") return;
+    if (
+      notificationsFetcher.data &&
+      "notificationsSaved" in notificationsFetcher.data
+    ) {
+      toast.success("Notification preferences saved.");
+    }
+  }, [notificationsFetcher.state, notificationsFetcher.data]);
+
+  const saveError =
+    notificationsFetcher.data && "notificationsError" in notificationsFetcher.data
+      ? notificationsFetcher.data.notificationsError
+      : undefined;
+  const notificationsDisabled = !preferences.ok;
+
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
       {/* Breadcrumb */}
@@ -129,7 +165,7 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
       <div className="mb-8">
         <h1 className="text-3xl font-bold">Settings</h1>
         <p className="mt-1 text-muted-foreground">
-          Update your profile details
+          Update your profile details and notification preferences
         </p>
       </div>
 
@@ -185,6 +221,52 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
               {fetcher.state !== "idle" ? "Saving..." : "Save Changes"}
             </Button>
           </fetcher.Form>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-8 max-w-md">
+        <CardHeader>
+          <h2 className="text-lg font-semibold">Notifications</h2>
+          <p className="text-sm text-muted-foreground">
+            Choose which notifications you get. Muting only stops future ones.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {(!preferences.ok || saveError) && (
+            <p role="alert" className="mb-4 text-sm text-destructive">
+              {saveError ?? "Couldn't load your notification preferences."}
+            </p>
+          )}
+          <notificationsFetcher.Form method="post" className="space-y-4">
+            <input type="hidden" name="intent" value="save-notifications" />
+            {preferences.switches.map(({ key, enabled }) => (
+              <label
+                key={`${key}-${enabled}`}
+                className="flex items-center justify-between gap-3 text-sm"
+              >
+                <span>{SWITCH_LABELS[key]}</span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  name="workflow"
+                  value={key}
+                  defaultChecked={enabled}
+                  disabled={notificationsDisabled}
+                  className="size-4"
+                />
+              </label>
+            ))}
+            <Button
+              type="submit"
+              disabled={
+                notificationsDisabled || notificationsFetcher.state !== "idle"
+              }
+            >
+              {notificationsFetcher.state !== "idle"
+                ? "Saving..."
+                : "Save Notifications"}
+            </Button>
+          </notificationsFetcher.Form>
         </CardContent>
       </Card>
 
