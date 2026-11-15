@@ -33,9 +33,9 @@ changes.
 | ------------------------- | ------ | ------ |
 | `discussion-question`     | #46    | create + commit |
 | `discussion-reply`        | #46    | create + commit (replaces the prototype's `discussions-reply`) |
-| `refund-request-approved` | #48    | later  |
-| `refund-request-declined` | #48    | later  |
-| `refund-request-opened`   | #48    | later  |
+| `refund-request-approved` | #48    | create + commit (to the buyer; `data.url` is `/settings` or `/team`) |
+| `refund-request-declined` | #48    | create + commit (same as approved) |
+| `refund-request-opened`   | #48    | create + commit (to every Platform Admin except the buyer; `data.url` is `/admin/refunds`) |
 | `seat-claimed`            | #49    | later  |
 | `new-enrollment`          | #49    | later  |
 

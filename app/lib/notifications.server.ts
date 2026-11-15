@@ -2,7 +2,19 @@ import { eq } from "drizzle-orm";
 import { Knock } from "@knocklabs/node";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import * as schema from "~/db/schema";
-import { comments, courses, lessons, modules, users } from "~/db/schema";
+import { alias } from "drizzle-orm/sqlite-core";
+import {
+  comments,
+  coupons,
+  courses,
+  lessons,
+  modules,
+  purchases,
+  refunds,
+  RefundStatus,
+  UserRole,
+  users,
+} from "~/db/schema";
 
 // ─── Notifications ───
 // One `notify*` function per Notification (see GLOSSARY.md), delivered through
@@ -275,4 +287,118 @@ export async function notifyComment(
   } else {
     await notifyDiscussionReply(db, commentId, sender);
   }
+}
+
+// ─── Refund Requests (#48) ───
+
+function loadRefundRequest(db: Db, refundRequestId: number) {
+  const decider = alias(users, "decider");
+  const row = db
+    .select({
+      id: refunds.id,
+      status: refunds.status,
+      reason: refunds.reason,
+      decisionNote: refunds.decisionNote,
+      amountRefunded: refunds.amountRefunded,
+      purchaseId: purchases.id,
+      amountPaid: purchases.amountPaid,
+      courseTitle: courses.title,
+      buyerId: users.id,
+      buyerName: users.name,
+      buyerAvatar: users.avatarUrl,
+      deciderId: decider.id,
+      deciderName: decider.name,
+      deciderAvatar: decider.avatarUrl,
+    })
+    .from(refunds)
+    .innerJoin(purchases, eq(refunds.purchaseId, purchases.id))
+    .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
+    .leftJoin(decider, eq(refunds.resolvedByUserId, decider.id))
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+  if (!row) return undefined;
+
+  // A Team Licence is the Purchase that granted Seats.
+  const seat = db
+    .select({ id: coupons.id })
+    .from(coupons)
+    .where(eq(coupons.purchaseId, row.purchaseId))
+    .get();
+  return { ...row, isTeamLicence: seat !== undefined };
+}
+
+// Call after an approve or decline commits. The buyer (the Student, or the
+// Team Admin for a Team Licence) is the recipient; the deciding Platform
+// Admin is the actor.
+export async function notifyRefundRequestDecided(
+  db: Db,
+  refundRequestId: number,
+  sender: NotificationSender = defaultSender()
+) {
+  const refund = loadRefundRequest(db, refundRequestId);
+  if (!refund || refund.deciderId === null || refund.deciderName === null) {
+    return;
+  }
+
+  let kind: "refund-request-approved" | "refund-request-declined";
+  if (refund.status === RefundStatus.Approved) kind = "refund-request-approved";
+  else if (refund.status === RefundStatus.Declined)
+    kind = "refund-request-declined";
+  else return;
+
+  const actor = toRecipient({
+    id: refund.deciderId,
+    name: refund.deciderName,
+    avatarUrl: refund.deciderAvatar,
+  });
+  const buyer = toRecipient({
+    id: refund.buyerId,
+    name: refund.buyerName,
+    avatarUrl: refund.buyerAvatar,
+  });
+
+  await deliver(sender, kind, refund.id, actor, [buyer], {
+    kind,
+    actorName: actor.name,
+    actorAvatar: actor.avatar,
+    courseTitle: refund.courseTitle,
+    reason: refund.reason,
+    decisionNote: refund.decisionNote,
+    amountCents: refund.amountRefunded ?? refund.amountPaid,
+    url: refund.isTeamLicence ? "/team" : "/settings",
+  });
+}
+
+// Call after a Refund Request is raised. Every Platform Admin (read from the
+// database now) is notified; `deliver` leaves out the buyer.
+export async function notifyRefundRequestOpened(
+  db: Db,
+  refundRequestId: number,
+  sender: NotificationSender = defaultSender()
+) {
+  const refund = loadRefundRequest(db, refundRequestId);
+  if (!refund) return;
+
+  const actor = toRecipient({
+    id: refund.buyerId,
+    name: refund.buyerName,
+    avatarUrl: refund.buyerAvatar,
+  });
+  const admins = db
+    .select()
+    .from(users)
+    .where(eq(users.role, UserRole.Admin))
+    .all()
+    .map(toRecipient);
+
+  await deliver(sender, "refund-request-opened", refund.id, actor, admins, {
+    kind: "refund-request-opened",
+    actorName: actor.name,
+    actorAvatar: actor.avatar,
+    courseTitle: refund.courseTitle,
+    reason: refund.reason,
+    amountCents: refund.amountPaid,
+    url: "/admin/refunds",
+  });
 }
